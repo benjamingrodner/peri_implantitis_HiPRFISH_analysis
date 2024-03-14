@@ -1,0 +1,18 @@
+functions_path: /fs/cbsuvlaminck2/workdir/bmg224/manuscripts/mgefish/code/functions
+input_table: input_table_tocluster.csv
+output_dir: ../outputs/segmentation_2024_03_07
+max_shift: 500
+gauss: 3
+diff_gauss: (2, 3)
+bg_smoothing: 5
+n_clust_bg: 10
+top_n_clust_bg: 9
+imin: 2
+dpi: 500
+n_clust: 25
+spec_dims: (10,5)
+umap_dims: (5,5)
+s_u: 1
+alpha_u: 0.25
+cmap_u: 'Spectral'
+ref_dir: "../../../manuscripts/mgefish/data/unused/fig_5/HiPRFISH_reference_spectra"
