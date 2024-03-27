@@ -1,5 +1,6 @@
-functions_path: /fs/cbsuvlaminck2/workdir/bmg224/manuscripts/mgefish/code/functions
-input_table: input_table_tocluster.csv
+functions_path: ../../../manuscripts/mgefish/code/functions
+# input_table: input_table_test.csv
+input_table: input_table_nonproblem.csv
 output_dir: ../outputs/segmentation_2024_03_07
 max_shift: 500
 gauss: 3
@@ -16,3 +17,39 @@ s_u: 1
 alpha_u: 0.25
 cmap_u: 'Spectral'
 ref_dir: "../../../manuscripts/mgefish/data/unused/fig_5/HiPRFISH_reference_spectra"
+moran:
+  radius_um: 3
+  lw: 1
+  ft: 7
+  dims: (2, 1)
+  l_col: 'k'
+  pad: 0.2
+  dpi: 500
+  spot_size: 1
+  dims_im: (4,4)
+l_func:
+  lw: 2
+  dims: (2,1)
+  ft: 7
+  dmax: 205
+  stepsize: 5
+cluster_size:
+  lw: 1
+  ft: 7
+  dims_cl: (4,4)
+  spot_size: 1
+  dpi: 250
+  dims_pl: (2,1)
+  min_cluster_size: 10
+
+min_box_size_um: 10
+
+fuzzy_box_counting:
+  box_edge_init_um: 50
+  divide_edgesize: 1.5
+  box_edge_min_um: 5
+  col: 'k'
+  ft: 7
+  dims: (4,4)
+  slope_xloc: 30
+

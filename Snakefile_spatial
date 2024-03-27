@@ -1,0 +1,1090 @@
+# Snakefile
+
+"""
+Pipeline to segment hiprfish images for hsdm project
+
+"""
+
+# =============================================================================
+# Imports
+# =============================================================================
+import pandas as pd
+import numpy as np
+import os
+import sys
+import glob
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import re
+import yaml
+from scipy.spatial.distance import squareform, pdist
+from sklearn.cluster import AgglomerativeClustering
+# import umap
+from scipy.spatial.distance import squareform, pdist, cdist
+from sklearn.neighbors import NearestNeighbors
+import math
+import hdbscan
+from scipy import stats
+from sklearn.linear_model import LinearRegression
+
+import libpysal as ps
+from esda.moran import Moran, Moran_BV
+from libpysal.weights import W
+import pointpats.quadrat_statistics as qs
+from pointpats import PointPattern, RectangleM
+from pointpats import distance_statistics as dst
+from pointpats import PoissonPointProcess as csr
+from pointpats.window import Window, poly_from_bbox, as_window, to_ccf
+
+
+
+sys.path.append(config['functions_path'])
+import fn_spectral_images as fsi
+import image_plots as ip
+import fn_hiprfish_classifier as fhc
+# import segmentation_func as sf
+import fn_analysis_plots as apl
+import fn_spatial_stats as fss
+
+
+# =============================================================================
+# Functions
+# =============================================================================
+
+def get_input_table():
+    input_table = pd.read_csv(config['input_table'])
+    # input_table.columns = config['input_table_cols']
+    return input_table
+
+
+def get_seg_fns(date, sn, fmt):
+    fns = dict_date_sn_fns[date][sn]
+    M, mtype = fsi.get_ntiles(fns[0])
+    seg_fns = []
+    for m in range(M):
+        seg_fns.append(fmt.format(date=date, sn=sn, m=m))
+    return seg_fns
+
+def get_fns(fmt):
+    fns = []
+    for date, dict_sn_fns in dict_date_sn_fns.items():
+        for sn in dict_sn_fns.keys():
+            fns.append(fmt.format(date=date, sn=sn))
+    return fns
+
+def get_czi_fns(date, sn):
+    return dict_date_sn_fns[date][sn]
+
+# =============================================================================
+# Setup
+# =============================================================================
+
+# args = sys.argv
+# config_fn = args[args.index("--configfile") + 1]
+
+input_table = get_input_table()
+filenames = input_table['filenames']
+
+dict_date_sn_fns = defaultdict(lambda: defaultdict(list))
+for fn in filenames:
+    bn = os.path.split(fn)[1]
+    date, bn = re.split('(?<=^\d{4}_\d{2}_\d{2})_', bn)
+    sn, ext = re.split("(?<=fov_\d{2})", bn)
+    dict_date_sn_fns[date][sn].append(fn)
+
+out_dir = config['output_dir'] + "/{date}/{date}_{sn}"
+
+# Segment
+out_dir_seg = out_dir + "/segs"
+out_dir_plot = out_dir + "/plots"
+ofmt = '/{date}_{sn}_M_{m}'
+seg_fmt = out_dir_seg + ofmt + "_seg.npy"
+props_fmt = out_dir_seg + ofmt + "_props.csv"
+plot_fmt = out_dir_plot + ofmt + "_seg_plot.png"
+rgb_fmt = out_dir_plot + ofmt + "_rgb_plot.png"
+segs_done_fmt = out_dir + "/snakemake_segment_done.txt"
+
+# Cluster
+out_fmt_clust = out_dir + "/cluster/{date}_{sn}"
+umap_fmt = out_fmt_clust + "_umap.png"
+spec_fmt = out_fmt_clust + "_spec_clust_{cl}.png"
+clust_fmt = out_fmt_clust + "_clusters.npy"
+mlab_fmt = out_fmt_clust + "_dict_index_mlab.yaml"
+
+# Classif
+bmg224_dir = '../../..'
+dict_date_pdfn = {
+    '2022_12_16': [
+        bmg224_dir 
+        + '/manuscripts/mgefish/data/HiPRFISH_probe_design' 
+        + '/welch2016_5b_no_633_channel.csv',
+        '5bit_no633'
+    ],
+    '2023_02_08': [
+        bmg224_dir 
+        + '/manuscripts/mgefish/data/HiPRFISH_probe_design' 
+        + '/welch2016_5b_no_633_channel.csv',
+        '5bit_no633'
+    ],
+    '2023_02_18': [
+        bmg224_dir 
+        + '/manuscripts/mgefish/data/HiPRFISH_probe_design'
+        + '/welch2016_5b_no_633_channel.csv',
+        '5bit_no633'
+    ],
+    '2023_10_16': [
+        bmg224_dir 
+        + '/harvard_dental/pick_distant_barcodes/2023_08_01_order'
+        + '/welch2016_7b_distant_v2.csv',
+        '7bit_no405'
+    ],
+    '2023_10_18': [
+        bmg224_dir 
+        + '/harvard_dental/pick_distant_barcodes/2023_08_01_order'
+        + '/welch2016_7b_distant_v2.csv',
+        '7bit_no405'
+    ],
+}
+out_fmt_classif = out_dir + "/classif"
+spec_classif_fmt = out_fmt_classif + "/spectra_plots/{date}_{sn}_spec_clust_{cl}.png"
+classif_fmt = out_fmt_classif + "/{date}_{sn}_dict_cluster_barcode.yaml"
+
+# get coords
+sciname_list = [
+    'Corynebacterium',
+    'Actinomyces',
+    'Rothia',
+    'Capnocytophaga',
+    'Prevotella',
+    'Porphyromonas',
+    'Streptococcus',
+    'Gemella',
+    'Veillonella',
+    'Selenomonas',
+    'Lautropia',
+    'Neisseriaceae',
+    'Pasteurellaceae',
+    'Campylobacter',
+    'Fusobacterium',
+    'Leptotrichia',
+    'Treponema',
+    'TM7'
+]
+colors = plt.get_cmap('tab20').colors
+# colors = [c + (1,) for c in colors]
+dict_sciname_color = dict(zip(sciname_list, colors))
+dict_sciname_color['Neisseria'] = dict_sciname_color['Neisseriaceae']
+dict_sciname_color['Saccharibacteria'] = dict_sciname_color['TM7']
+classif_plot_fmt = out_dir_plot + '/{date}_{sn}_M_{m}_classif.png'
+classif_plot_all_fmt = out_dir_plot + '/{date}_{sn}_classif_alltiles.png'
+centroid_sciname_fmt = out_fmt_classif + '/{date}_{sn}_centroid_sciname.csv'
+
+# global_autocorr
+spatial_dir = out_dir + '/spatial_statistics'
+moran_dir = spatial_dir + '/morans_i'
+adjacency_hist_fmt = moran_dir + '/{date}_{sn}_adjacency_histogram.png'
+moran_plot_fmt = moran_dir + "/{date}_{sn}_sciname_{scn}_moran_plot.png"
+scatter_plot_fmt = moran_dir + "/{date}_{sn}_sciname_{scn}_scatter_plot.png"
+moran_table_fmt = moran_dir + "/{date}_{sn}_moran_values.csv"
+moran_bv_dir = spatial_dir + '/morans_bv'
+scatter_plot_bv_fmt = moran_bv_dir + "/{date}_{sn}_scinames_{scn0}_{scn1}_scatter_plot.png"
+moran_plot_bv_fmt = moran_bv_dir + "/{date}_{sn}_scinames_{scn0}_{scn1}_moran_plot.png"
+moran_bv_table_fmt = moran_bv_dir + "/{date}_{sn}_moran_bv_values.csv"
+
+# cluster_size
+cl_size_dir = spatial_dir + '/cluster_size'
+cluster_size_fmt = cl_size_dir + '/{date}_{sn}_sciname_{scn}_cluster_size.npy'
+cluster_size_plot_fmt = cl_size_dir + '/plots/{date}_{sn}_sciname_{scn}_cluster_size_plot.png'
+power_law_plot_fmt = cl_size_dir + '/plots/{date}_{sn}_sciname_{scn}_power_law_plot.png'
+power_law_vals_fmt = cl_size_dir + '/{date}_{sn}_power_law_vals.csv'
+
+# feature_matrix
+sample_compare_dir = config['output_dir'] + '/compare_samples'
+feature_matrix_fn = sample_compare_dir + '/samples_feature_matrix.csv'
+
+# aggregate_cluster_size
+cluster_size_dict_fn = sample_compare_dir + '/cluster_size_distribution/dict_sample_sciname_clustersize.yaml'
+
+# box_counting_dimension
+box_counting_fmt = spatial_dir + '/box_counting/{date}_{sn}_box_counting_regression.csv'
+multispecies_box_counting_fmt = spatial_dir + '/box_counting/{date}_{sn}_multispecies_box_counting_regression.csv'
+multispecies_box_counting_curve_fmt = spatial_dir + '/box_counting/{date}_{sn}_multispecies_box_counting_regression.png'
+fuzzy_box_counting_fmt = spatial_dir + '/box_counting/{date}_{sn}_fuzzy_box_counting_regression.csv'
+fuzzy_box_counting_curve_fmt = spatial_dir + '/box_counting/{date}_{sn}_fuzzy_box_counting_regression.png'
+
+# aggregate_box_counting
+multispecies_box_count_all_fn = sample_compare_dir + 'box_/multispecies_box_counting_table.csv'
+fuzzy_box_count_all_fn = sample_compare_dir + '/fuzzy_box_counting_table.csv'
+
+# =============================================================================
+# Rule all output
+# =============================================================================
+
+segs_done = get_fns(segs_done_fmt)
+clust_done = get_fns(clust_fmt)
+classif_done = get_fns(classif_fmt)
+coords_done = get_fns(centroid_sciname_fmt)
+global_autocorr_done = get_fns(moran_bv_table_fmt)
+clust_size_done = get_fns(power_law_vals_fmt)
+box_counting_done = get_fns(box_counting_fmt)
+multispecies_box_counting_done = get_fns(fuzzy_box_counting_fmt)
+
+# seg_fns_all = get_fns(seg_fmt)
+# props_fns_all = get_fns(props_fmt)
+# plot_fns_all = get_fns(plot_fmt)
+# rgb_fns_all = get_fns(rgb_fmt)
+
+
+# =============================================================================
+# Snake rules
+# =============================================================================
+
+rule all:
+    input:
+        multispecies_box_count_all_fn,
+        fuzzy_box_count_all_fn
+
+
+
+
+rule global_autocorr:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        adjacency_hist_fn = adjacency_hist_fmt,
+        moran_table_fn = moran_table_fmt,
+        moran_bv_table_fn = moran_bv_table_fmt,
+    run:
+        pdict = config['moran']
+
+        # Get coords 
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        # Get adjacency
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+        radius_pix = pdict['radius_um'] / res_umpix
+        neigh = NearestNeighbors(radius=radius_pix)
+        nbrs = neigh.fit(coords)
+        nn_dists, nn_inds = nbrs.radius_neighbors(coords)
+
+        # Plot adjacency
+        _ = plt.hist([len(ni) for ni in nn_inds])
+        _ = plt.xlabel(
+            'Number of cells within ' 
+            + str(pdict['radius_um']) 
+            + 'μm (' + str(int(radius_pix)) + ' pixels)'
+        )
+        ip.save_fig(output.adjacency_hist_fn)
+
+        # Build weights matrix
+        neighbors = {}
+        for i, (nn_i) in enumerate(nn_inds):
+            neighbors[i] = [ni for ni in nn_i if ni != i]
+        w = W(neighbors)
+
+        # Get morans I
+        xlim = (0, np.max(coords[:, 1]))
+        ylim = (0, np.max(coords[:, 0]))
+        moran_table = defaultdict(list)
+        for scn in scn_unq:
+            # calculate morans i
+            col = dict_sciname_color[scn]
+            bool_scn = scinames == scn
+            y = bool_scn * 1
+            mi = Moran(y, w)
+            # print(scn, mi.I, mi.p_sim)
+            moran_table["sciname"].append(scn)
+            moran_table["I_expected"].append(mi.EI)
+            moran_table["I_measured"].append(mi.I)
+            moran_table["p_simulation"].append(mi.p_sim)
+            # PLot the simluation vs observed
+            fig, ax = apl.general_plot(
+                col=pdict['l_col'], 
+                dims=eval(pdict['dims']), 
+                lw=pdict['lw'], 
+                ft=pdict['ft'], 
+                pad=pdict['pad']
+            )
+            apl.plot_morans_i_sim_obj(
+                ax, mi, 
+                lw=pdict['lw'], 
+                ft=pdict['ft'], 
+                col=col, 
+                l_col=pdict['l_col']
+            )
+            moran_fn = moran_plot_fmt.format(
+                date=wildcards.date, sn=wildcards.sn, scn=scn
+            )
+            ip.check_dir(moran_fn)
+            ip.save_fig(moran_fn)
+            plt.close()
+
+            # Plot the scatter locations
+            coord_scn = coords[bool_scn]
+            fig, ax = ip.general_plot(
+                col='w', 
+                dims=eval(pdict['dims_im']), 
+                lw=pdict['lw'], 
+                ft=pdict['ft']
+            )
+            ax.scatter(
+                coord_scn[:,1], 
+                coord_scn[:,0], 
+                s=pdict['spot_size'], 
+                edgecolors='none',
+                color=col)
+            ax.set_xlim(xlim[0], xlim[1])
+            ax.set_ylim(ylim[0], ylim[1])
+            ax.invert_yaxis()
+            ax.set_aspect('equal')
+            fig.patch.set_alpha(1)
+            fig.patch.set_facecolor('k')
+            scatter_fn = scatter_plot_fmt.format(
+                date=wildcards.date, sn=wildcards.sn, scn=scn
+            )
+            ip.check_dir(scatter_fn)
+            ip.save_fig(scatter_fn, dpi=pdict['dpi'], transp=False)
+            plt.close()
+
+        # Save morans info
+        pd.DataFrame(moran_table).to_csv(
+            output.moran_table_fn, index=False
+        )
+
+        # Morans bivariate corrrelation
+        moran_bv_table = defaultdict(list)
+        for i, scn0 in enumerate(scn_unq):
+            for j, scn1 in enumerate(scn_unq):
+                if i != j:
+                    # calculate morans bivariate
+                    col0 = dict_sciname_color[scn0]
+                    col1 = dict_sciname_color[scn1]
+                    bool_scn0 = scinames == scn0
+                    bool_scn1 = scinames == scn1
+                    y0 = bool_scn0 * 1
+                    y1 = bool_scn1 * 1
+                    mbv = Moran_BV(y0, y1, w)
+                    moran_bv_table["sciname0"].append(scn0)
+                    moran_bv_table["sciname1"].append(scn1)
+                    moran_bv_table["I_expected"].append(mbv.EI_sim)
+                    moran_bv_table["I_measured"].append(mbv.I)
+                    moran_bv_table["p_simulation"].append(mbv.p_sim)
+
+                    # PLot the simluation vs observed
+                    fig, ax = apl.general_plot(
+                        col=pdict['l_col'], 
+                        dims=eval(pdict['dims']), 
+                        lw=pdict['lw'], 
+                        ft=pdict['ft'], 
+                        pad=pdict['pad']
+                    )
+                    apl.plot_morans_i_sim_obj(
+                        ax, mbv, 
+                        lw=pdict['lw'], 
+                        ft=pdict['ft'], 
+                        col=col0, 
+                        l_col=pdict['l_col']
+                    )
+                    moran_bv_fn = moran_plot_bv_fmt.format(
+                        date=wildcards.date, 
+                        sn=wildcards.sn, 
+                        scn0=scn0, 
+                        scn1=scn1
+                    )
+                    ip.save_fig(moran_bv_fn)
+                    plt.close()
+
+                    # Plot the scatter locations
+                    coord_scn0 = coords[bool_scn0]
+                    coord_scn1 = coords[bool_scn1]
+                    fig, ax = ip.general_plot(
+                        col='w', 
+                        dims=eval(pdict['dims_im']), 
+                        lw=pdict['lw'], 
+                        ft=pdict['ft']
+                    )
+                    ax.scatter(
+                        coord_scn0[:,1], 
+                        coord_scn0[:,0], 
+                        s=pdict['spot_size'], 
+                        edgecolors='none',
+                        color=col0
+                    )
+                    ax.scatter(
+                        coord_scn1[:,1], 
+                        coord_scn1[:,0], 
+                        s=pdict['spot_size'], 
+                        edgecolors='none',
+                        color=col1
+                        )
+                    ax.set_xlim(xlim[0], xlim[1])
+                    ax.set_ylim(ylim[0], ylim[1])
+                    ax.invert_yaxis()
+                    ax.set_aspect('equal')
+                    fig.patch.set_alpha(1)
+                    fig.patch.set_facecolor('k')
+                    ip.check_dir(moran_bv_fn)
+                    scatter_bv_fn = scatter_plot_bv_fmt.format(
+                        date=wildcards.date, 
+                        sn=wildcards.sn,
+                        scn0=scn0, 
+                        scn1=scn1
+                    )
+                    ip.check_dir(scatter_bv_fn)
+                    ip.save_fig(
+                        scatter_bv_fn, dpi=pdict['dpi'], transp=False
+                    )
+                    plt.close()
+        # Save the bivariate info
+        pd.DataFrame(moran_bv_table).to_csv(
+            output.moran_bv_table_fn, index=False
+        )
+
+
+rule cluster_size:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt    
+    output:
+        power_law_vals_fn = power_law_vals_fmt
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        xlim = (0, np.max(coords[:, 1]))
+        ylim = (0, np.max(coords[:, 0]))
+
+        pdict = config['cluster_size']
+
+        dict_df = defaultdict(list)
+        for scn in scn_unq:
+            # cluster coords
+            col = dict_sciname_color[scn]
+            bool_scn = scinames == scn
+            coord_scn = coords[bool_scn]
+            if coord_scn.shape[0] > pdict['min_cluster_size']:
+                hdb = hdbscan.HDBSCAN(
+                    min_cluster_size=pdict['min_cluster_size']
+                ).fit(coord_scn).labels_
+            else:
+                hdb = np.array([-1]*coord_scn.shape[0])
+            cluster_size_fn = cluster_size_fmt.format(
+                date=wildcards.date, sn=wildcards.sn, scn=scn
+            )
+            ip.check_dir(cluster_size_fn)
+            np.save(cluster_size_fn, hdb)
+
+            # Plot clusters
+            fig, ax = ip.general_plot(
+                col='w', 
+                dims=eval(pdict['dims_cl']), 
+                lw=pdict['lw'], 
+                ft=pdict['ft']
+            )
+            coord_scn_cl = coord_scn[hdb != -1]
+            hdb_cl = hdb[hdb != -1]
+            ax.scatter(
+                coord_scn_cl[:,1], 
+                coord_scn_cl[:,0],
+                s=pdict['spot_size'], 
+                c=hdb_cl, 
+                cmap='gist_rainbow',
+                edgecolors='none'
+            )
+            coord_scn_non = coord_scn[hdb == -1]
+            ax.scatter(
+                coord_scn_non[:,1], 
+                coord_scn_non[:,0], 
+                s=pdict['spot_size'], 
+                color=[0.75]*3,
+                edgecolors='none'
+            )
+            ax.set_xlim(xlim[0], xlim[1])
+            ax.set_ylim(ylim[0], ylim[1])
+            ax.invert_yaxis()
+            ax.set_aspect('equal')
+            fig.patch.set_facecolor('k')
+            fig.patch.set_alpha(1)
+            # print(np.unique(hdb))
+
+            # count spots in clusters and plot convex hull on clusters
+            # areas = []
+            counts = []
+            for cl in np.unique(hdb_cl):
+                coords_cl = coord_scn[hdb == cl]
+                ch_cl = ps.cg.convex_hull(coords_cl.tolist())
+                ch_arr = np.array(to_ccf(ch_cl))
+                ax.plot(ch_arr[:,1], ch_arr[:,0],'w', lw=pdict['lw'])
+                # w = Window([ch_cl])
+                # areas.append(w.area)
+                counts.append(coords_cl.shape[0])
+                # cent = w.centroid
+                # ax.text(cent[1], cent[0], int(w.area), color='w', fontsize=ft)
+            cluster_size_plot_fn = cluster_size_plot_fmt.format(
+                date=wildcards.date, sn=wildcards.sn, scn=scn
+            )
+            ip.check_dir(cluster_size_plot_fn)
+            ip.save_fig(
+                cluster_size_plot_fn, dpi=pdict['dpi'], transp=False
+            )
+            plt.close()
+
+            # Plot power law stuff? Mori, Smith, Hsu, 2020
+            if len(counts) > 3: 
+                counts_sort = sorted(counts)
+                nclust = len(counts_sort)
+                Pr = [r/nclust for r in range(nclust,0,-1)]
+                fig, ax = ip.general_plot(
+                    ft=pdict['ft'], 
+                    dims=eval(pdict['dims_pl']), 
+                    lw=pdict['lw']
+                )
+                lnpr = np.log(Pr) - 0.5  # improve alpha estimate Gabaix and ibragimov 2011
+                lncs = np.log(counts_sort)
+                ax.plot(lnpr, lncs)
+                power_law_plot_fn = power_law_plot_fmt.format(
+                    date=wildcards.date, sn=wildcards.sn, scn=scn
+                )
+                ip.check_dir(power_law_plot_fn)
+                ip.save_fig(power_law_plot_fn)
+                plt.close()
+
+                rval, pval = stats.pearsonr(lnpr, lncs)
+                model = LinearRegression().fit(lncs[:, None], lnpr)
+                alpha = 1 / model.coef_[0]
+                coef = model.coef_[0]
+                intercept = model.intercept_
+                score = model.score(lncs[:, None], lnpr)
+
+            else:
+                rval = 'nan'
+                pval = 'nan'
+                alpha = 'nan'
+                coef = 'nan'
+                intercept = 'nan'
+                score = 'nan'
+
+
+            # Add vals to dict
+            dict_df['sciname'].append(scn)
+            dict_df['rval'].append(rval)
+            dict_df['pval'].append(pval)
+            dict_df['alpha'].append(alpha)
+            dict_df['coef'].append(coef)
+            dict_df['intercept'].append(intercept)
+            dict_df['score'].append(score)
+        # Save values
+        pd.DataFrame(dict_df).to_csv(
+            output.power_law_vals_fn, index=False
+        )
+
+rule feature_matrix:
+    input:
+        centroid_sciname_fns = get_fns(centroid_sciname_fmt),   
+        moran_table_fns = get_fns(moran_table_fmt),
+        moran_bv_table_fns = get_fns(moran_bv_table_fmt),
+        power_law_vals_fns = get_fns(power_law_vals_fmt)
+    output:
+        feature_matrix_fn = feature_matrix_fn
+    run:
+        ct_fractions = []
+        mi_values = []
+        mbv_values = []
+        power_law_values = []
+        for i in range(len(input.centroid_sciname_fns)):
+            centroid_sciname = pd.read_csv(input.centroid_sciname_fns[i])
+            moran_table = pd.read_csv(input.moran_table_fns[i])
+            moran_bv_table = pd.read_csv(input.moran_bv_table_fns[i])
+            power_law_vals = pd.read_csv(input.power_law_vals_fns[i])
+
+            scinames = centroid_sciname["sciname"].values
+            ncells = len(scinames)
+            fracs = []
+            mis = []
+            mbvs = []
+            alphas = []
+            for scn in sciname_list:
+                # Get cell type fractions
+                fr = np.sum(scinames == scn) / ncells
+                fracs.append(fr)
+
+                # Get morans i vals 
+                bool_mi = moran_table['sciname'] == scn
+                mi = moran_table.loc[bool_mi, 'I_measured'].values
+                mi = mi[0] if len(mi) > 0 else 0
+                mis.append(mi)
+
+                # Morans bv vals 
+                for scn1 in sciname_list:
+                    if scn != scn1:
+                        bool_mbv0 = moran_bv_table['sciname0'] == scn
+                        bool_mbv1 = moran_bv_table['sciname1'] == scn1
+                        mbv = moran_bv_table.loc[
+                            bool_mbv0 * bool_mbv1, 'I_measured'
+                        ].values
+                        mbv = mbv[0] if len(mbv) > 0 else 0
+                        mbvs.append(mbv)
+
+                # Get cluster size power law values
+                alpha = power_law_vals.loc[
+                    power_law_vals['sciname'] == scn, 'alpha'
+                ].values
+                alpha = alpha[0] if len(alpha) > 0 else 0
+                if math.isnan(alpha):
+                    alpha = 0
+                alphas.append(alpha)
+
+            # build out matrices
+            ct_fractions.append(fracs)
+            mi_values.append(mis)
+            mbv_values.append(mbvs)
+            power_law_values.append(alphas)
+        
+        # construct final boss
+        lsts = []
+        # print('\n\nSHAPES:')
+        for lst in [ct_fractions, mi_values, mbv_values, power_law_values]:
+            arr = np.vstack(lst)
+            # print(arr.shape)
+            lsts.append(arr)
+        feature_matrix = np.hstack(lsts)
+
+        # get columns
+        cols_frac = [scn + '_frac' for scn in sciname_list]
+        cols_mi = [scn + '_moran_i' for scn in sciname_list]
+        cols_mbv = []
+        for scn0 in sciname_list:
+            for scn1 in sciname_list:
+                if scn0 != scn1:
+                    cols_mbv.append(scn0 + '_' + scn1 + '_moran_bv')
+        cols_alpha = [scn + '_power_law' for scn in sciname_list]
+        # print('\n\nLENgths:')
+        # print(len(cols_frac))
+        # print(len(cols_mi))
+        # print(len(cols_mbv))
+        # print(len(cols_alpha))
+        cols = cols_frac + cols_mi + cols_mbv + cols_alpha
+
+        # Get index
+        index = get_fns('{date}_{sn}')
+
+        # Save final boss
+        pd.DataFrame(feature_matrix, columns=cols, index=index).to_csv(
+            output.feature_matrix_fn
+        )
+
+rule aggregate_cluster_size:
+    input:
+        power_law_vals_fns = get_fns(power_law_vals_fmt)
+    output:
+        cluster_size_dict_fn = cluster_size_dict_fn
+    run:
+        dict_sn_scn_clsize = defaultdict(dict)
+        for date, dict_sn_fns in dict_date_sn_fns.items():
+            for sn in dict_sn_fns.keys():
+                cluster_size_glob = cluster_size_fmt.format(
+                    date=date, sn=sn, scn='*'
+                )
+                d_sn = date + '_' + sn
+                scn_fns = glob.glob(cluster_size_glob)
+                for fn in scn_fns:
+                    scn = re.search('(?<=sciname_)[A-Za-z]+', fn)[0]
+                    clusters = np.load(fn)
+                    _, counts = np.unique(clusters, return_counts=True)
+                    dict_sn_scn_clsize[d_sn][scn] = counts
+        with open(output.cluster_size_dict_fn, 'w') as f:
+            yaml.dump(dict_sn_scn_clsize, f, default_flow_style=False)
+
+rule multispecies_box_counting:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        multispecies_box_counting_fn = multispecies_box_counting_fmt,
+        multispecies_box_counting_curve_fn = multispecies_box_counting_curve_fmt
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        # Get adjacency
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+
+        # Get cells window
+        convex_hull = ps.cg.convex_hull(coords.tolist())
+        ch_arr = np.array(to_ccf(convex_hull))
+        window = Window([convex_hull])
+        bbox = window.bbox
+        w_shp = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])
+
+        # get params
+        pdict = config['fuzzy_box_counting']
+
+        # Get counts
+        pp = PointPattern(coords, window=window)
+        box_edge_um = pdict['box_edge_init_um']
+        counts = []
+        box_size = []
+        df_out = defaultdict(list)
+        while box_edge_um >= pdict['box_edge_min_um']:
+            box_edge = box_edge_um / res_umpix
+            nxy = np.ceil(w_shp / box_edge).astype(int)
+
+            rect = fss.RectangleM_new(
+                pp, 
+                count_column = nxy[1], 
+                count_row = nxy[1],
+                labels=scinames
+            ).get_multispecies_tiles()
+            Hs = np.array(list(rect.values()))
+            count = sum(Hs)
+            counts.append(count)
+            dxy = w_shp / nxy
+            diag = np.sqrt(np.sum(dxy**2))
+            diag_um = diag * res_umpix
+            box_size.append(diag_um)
+
+            box_edge_um /= pdict['divide_edgesize']
+        
+        # Get regression
+        lnc = np.log(counts)
+        lns = np.log(box_size)
+        slope, intercept, r_value, p_value, std_err = stats.linregress(
+            lns, lnc
+            )
+
+        # add to df
+        df_out['slope'].append(slope)
+        df_out['intercept'].append(intercept)
+        df_out['r_value'].append(r_value)
+        df_out['r_squared'].append(r_value**2)
+        df_out['p_value'].append(p_value)
+        df_out['std_err'].append(std_err)
+
+        # save df
+        pd.DataFrame(df_out).to_csv(output.multispecies_box_counting_fn, index=False)
+
+        # Plot curve
+        fig, ax = ip.general_plot(
+            dims=eval(pdict['dims']),
+            ft=pdict['ft'],
+            col=pdict['col'],
+        )
+        ax.scatter(box_size, counts, color=pdict['col'])
+        x = np.array([min(box_size), max(box_size)])
+        y = math.exp(intercept) * x**slope
+        ax.plot(x, y, color=pdict['col'])
+        x = pdict['slope_xloc']
+        y = math.exp(intercept) * x**slope
+        ax.text(
+            x,
+            y,
+            (
+                "Slope = " + str(round(slope, 2)) 
+                + ", R^2 = " + str(round(r_value**2, 4))
+            ),
+            ha="left",
+            va="bottom",
+            fontsize=pdict['ft'],
+            color=pdict['col']
+        )
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_ylabel('log(box count to cover edges)')
+        ax.set_xlabel('log(box size)')
+        ip.save_fig(output.multispecies_box_counting_curve_fn)
+        plt.close()
+
+rule fuzzy_box_counting:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        fuzzy_box_counting_fn = fuzzy_box_counting_fmt,
+        fuzzy_box_counting_curve_fn = fuzzy_box_counting_curve_fmt
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        # Get adjacency
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+
+        # Get cells window
+        convex_hull = ps.cg.convex_hull(coords.tolist())
+        ch_arr = np.array(to_ccf(convex_hull))
+        window = Window([convex_hull])
+        bbox = window.bbox
+        w_shp = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])
+
+        # get params
+        pdict = config['fuzzy_box_counting']
+
+        # Get counts
+        pp = PointPattern(coords, window=window)
+        box_edge_um = pdict['box_edge_init_um']
+        counts = []
+        box_size = []
+        df_out = defaultdict(list)
+        while box_edge_um >= pdict['box_edge_min_um']:
+            box_edge = box_edge_um / res_umpix
+            nxy = np.ceil(w_shp / box_edge).astype(int)
+
+            rect = fss.RectangleM_new(
+                pp, 
+                count_column = nxy[1], 
+                count_row = nxy[1],
+                labels=scinames
+            ).get_simpson_diversities()
+            Hs = np.array(list(rect.values()))
+            count = sum(Hs)
+            counts.append(count)
+            dxy = w_shp / nxy
+            diag = np.sqrt(np.sum(dxy**2))
+            diag_um = diag * res_umpix
+            box_size.append(diag_um)
+
+            box_edge_um /= pdict['divide_edgesize']
+        
+        # Get regression
+        lnc = np.log(counts)
+        lns = np.log(box_size)
+        slope, intercept, r_value, p_value, std_err = stats.linregress(
+            lns, lnc
+            )
+
+        # add to df
+        df_out['slope'].append(slope)
+        df_out['intercept'].append(intercept)
+        df_out['r_value'].append(r_value)
+        df_out['r_squared'].append(r_value**2)
+        df_out['p_value'].append(p_value)
+        df_out['std_err'].append(std_err)
+
+        # save df
+        pd.DataFrame(df_out).to_csv(output.fuzzy_box_counting_fn, index=False)
+
+        # Plot curve
+        fig, ax = ip.general_plot(
+            dims=eval(pdict['dims']),
+            ft=pdict['ft'],
+            col=pdict['col'],
+        )
+        ax.scatter(box_size, counts, color=pdict['col'])
+        x = np.array([min(box_size), max(box_size)])
+        y = math.exp(intercept) * x**slope
+        ax.plot(x, y, color=pdict['col'])
+        x = pdict['slope_xloc']
+        y = math.exp(intercept) * x**slope
+        ax.text(
+            x,
+            y,
+            (
+                "Slope = " + str(round(slope, 2)) 
+                + ", R^2 = " + str(round(r_value**2, 4))
+            ),
+            ha="left",
+            va="bottom",
+            fontsize=pdict['ft'],
+            color=pdict['col']
+        )
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_ylabel('log(box count to cover edges)')
+        ax.set_xlabel('log(box size)')
+        ip.save_fig(output.fuzzy_box_counting_curve_fn)
+        plt.close()
+
+rule aggregate_multi_box_counting:
+    input:
+        multispecies_box_counting_fns = get_fns(multispecies_box_counting_fmt)
+    output:
+        multispecies_box_count_all_fn = multispecies_box_count_all_fn
+    run:
+        df_out = pd.DataFrame([])
+        for fn in input.multispecies_box_counting_fns:
+            vals = pd.read_csv(fn)
+            df_out = df_out.append(vals)
+
+        df_out.index = get_fns('{date}_{sn}')
+        df_out.to_csv(output.multispecies_box_count_all_fn)
+
+rule aggregate_fuzzy_box_counting:
+    input:
+        fuzzy_box_counting_fns = get_fns(fuzzy_box_counting_fmt)
+    output:
+        fuzzy_box_count_all_fn = fuzzy_box_count_all_fn
+    run:
+        df_out = pd.DataFrame([])
+        for fn in input.fuzzy_box_counting_fns:
+            vals = pd.read_csv(fn)
+            df_out = df_out.append(vals)
+
+        df_out.index = get_fns('{date}_{sn}')
+        df_out.to_csv(output.fuzzy_box_count_all_fn)
+
+
+# rule box_counting_dimension_old:
+#     input:
+#         czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+#         centroid_sciname_fn = centroid_sciname_fmt
+#     output:
+#         box_counting_fn = box_counting_fmt
+#     run:
+#         centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+#         coords = np.array([
+#             eval(c) for c in centroid_sciname["coord"].values
+#         ])
+#         scinames = centroid_sciname["sciname"].values
+#         scn_unq = np.unique(scinames)
+
+#         # Get adjacency
+#         res_mpix = fsi.get_resolution(input.czi_fns[0])
+#         res_umpix = res_mpix * 1e6
+
+#         # Get cells window
+#         convex_hull = ps.cg.convex_hull(coords.tolist())
+#         ch_arr = np.array(to_ccf(convex_hull))
+#         window = Window([convex_hull])
+
+#         # Get boxes initial
+#         bbox = window.bbox
+#         w_shp = [bbox[2] - bbox[0], bbox[3] - bbox[1]]
+#         dmin = np.min(w_shp)
+#         dmax = np.max(w_shp)
+#         ind_dmin = np.argmin(w_shp)
+#         ind_dmax = np.argmax(w_shp)
+#         dim_xy_init = np.array([0,0])
+#         dim_xy_init[ind_dmin] = 2
+#         ndmax = int(math.ceil(dmax / dmin))
+#         dim_xy_init[ind_dmax] = ndmax
+#         dmax_i_um_init = dmax / dim_xy_init[ind_dmax] * res_umpix
+
+#         # get fractal dimension
+#         df_out = defaultdict(list)
+#         for scn in scn_unq:
+#             # Get point pattern
+#             col_obs = dict_sciname_color[scn]
+#             bool_scn = scinames == scn
+#             coord_scn = coords[bool_scn]
+#             pp = PointPattern(coord_scn, window=window)
+
+#             # Get qstatistic
+#             dxy = dim_xy_init
+#             dmax_i_um = dmax_i_um_init
+#             counts = []
+#             box_size = []
+#             if pp.n > 1:
+#                 while dmax_i_um > config['min_box_size_um']:
+#                     # q_r = qs.QStatistic(pp, shape="rectangle", nx=dxy[1], ny=dxy[0])
+#                     # lh = lh_init
+#                     # q_r = qs.QStatistic(pp, shape="hexagon", lh=lh)
+#                     # q_r.plot()
+#                     print(pp.summary())
+#                     rect = RectangleM(pp, dxy[1], dxy[0]).point_location_sta()
+#                     c = np.array(list(rect.values()))
+#                     count = sum(c > 0)
+#                     counts.append(count)
+#                     box_size.append(dmax_i_um)
+
+#                     dxy *= 2
+#                     dmax_i_um = dmax / dxy[ind_dmax] * res_umpix
+
+#                 # Get regression
+#                 lnc = np.log(counts)
+#                 lns = np.log(box_size)
+#                 slope, intercept, r_value, p_value, std_err = stats.linregress(lns, lnc)
+
+#                 # add to df
+#                 df_out['sciname'].append(scn)
+#                 df_out['slope'].append(slope)
+#                 df_out['intercept'].append(intercept)
+#                 df_out['r_value'].append(r_value)
+#                 df_out['r_squared'].append(r_value**2)
+#                 df_out['p_value'].append(p_value)
+#                 df_out['std_err'].append(std_err)
+
+#         # save df
+#         pd.DataFrame(df_out).to_csv(output.box_counting_fn, index=False)
+
+
+# rule l_func:
+#     input:
+#         czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+#         centroid_sciname_fn = centroid_sciname_fmt
+#     output:
+#     run:
+#         def deriv(K, h):
+#             return np.diff(K) / np.diff(h)
+#         # Define distance range
+#         res_mpix = fsi.get_resolution(czi_fns[0])
+#         res_umpix = res_mpix * 1e6
+#         d = np.arange(0, dmax, stepsize)
+#         dpix = d / res_umpix
+#         # Get cells window
+#         convex_hull = ps.cg.convex_hull(coords.tolist())
+#         ch_arr = np.array(to_ccf(convex_hull))
+#         plt.plot(ch_arr[:,1], ch_arr[:,0])
+#         plt.gca().invert_yaxis()
+#         window = Window([convex_hull])
+
+#         for scn in scn_unq[:]:
+#             # Get point pattern
+#             col_obs = dict_sciname_color[scn]
+#             bool_scn = scinames == scn
+#             coord_scn = coords[bool_scn]
+#             pp = PointPattern(coord_scn, window=window)
+#             # Measure L values
+#             lenv = dst.L(pp, d=dpix)
+#             # Plot L values
+#             fig, axes = ip.general_plot(
+#                 shp=(3,1), dims=dims, ft=ft, col='k', lw=lw
+#                 )
+#             x = lenv.d
+#             ax.plot(x, lenv.l, lw=lw, color=col_obs)
+#             xlab = np.arange(0, dmax, 10)
+#             xticks = xlab / res_umpix
+#             _ = ax.set_xticks(xticks, labels=xlab)
+#             ax.plot([xticks[0], xticks[-1]],[0,0], 'k')
+#             ax.set_xlim([xticks[0], xticks[-1]])
+#             # PLot derivative of L
+#             h = lenv.d
+#             Lpobs = deriv(lenv.l, h)
+#             fig, ax = ip.general_plot(dims=dims, ft=ft, col='k', lw=lw)
+#             x = h[:-1]
+#             ax.plot(x, Lpobs, lw=lw, color=col_obs)
+#             xlab = np.arange(0, dmax, 10)
+#             xticks = xlab / res_umpix
+#             _ = ax.set_xticks(xticks, labels=xlab)
+#             ax.plot([xticks[0], xticks[-1]],[0,0], 'k')
+#             ax.set_xlim([xticks[0], xticks[-1]])
+#             # PLot second derivative of L
+#             h = x
+#             Lppobs = deriv(Lpobs, h)
+#             fig, ax = ip.general_plot(dims=dims, ft=ft, col='k', lw=lw)
+#             x = h[:-1]
+#             ax.plot(x, Lppobs, lw=lw, color=col_obs)
+#             xlab = np.arange(0, dmax, 10)
+#             xticks = xlab / res_umpix
+#             _ = ax.set_xticks(xticks, labels=xlab)
+#             ax.plot([xticks[0], xticks[-1]],[0,0], 'k')
+#             ax.set_xlim([xticks[0], xticks[-1]])

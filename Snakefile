@@ -28,6 +28,7 @@ import fn_spectral_images as fsi
 import image_plots as ip
 import fn_hiprfish_classifier as fhc
 import segmentation_func as sf
+import math
 
 
 # =============================================================================
@@ -162,7 +163,17 @@ classif_plot_fmt = out_dir_plot + '/{date}_{sn}_M_{m}_classif.png'
 classif_plot_all_fmt = out_dir_plot + '/{date}_{sn}_classif_alltiles.png'
 centroid_sciname_fmt = out_fmt_classif + '/{date}_{sn}_centroid_sciname.csv'
 
-# get adjacency
+# global_autocorr
+spatial_dir = out_dir + '/spatial_statistics'
+moran_dir = spatial_dir + '/morans_i'
+adjacency_hist_fmt = moran_dir + '/{date}_{sn}_adjacency_histogram.png'
+moran_plot_fmt = moran_dir + "/{date}_{sn}_sciname_{scn}_moran_plot.png"
+scatter_plot_fmt = moran_dir + "/{date}_{sn}_sciname_{scn}_scatter_plot.png"
+moran_table_fmt = moran_dir + "/{date}_{sn}_moran_values.csv"
+moran_bv_dir = spatial_dir + '/morans_bv'
+scatter_plot_bv_fmt = moran_bv_dir + "/{date}_{sn}_scinames_{scn0}_{scn1}_scatter_plot.png"
+moran_plot_bv_fmt = moran_bv_dir + "/{date}_{sn}_scinames_{scn0}_{scn1}_moran_plot.png"
+moran_bv_table_fmt = moran_bv_dir + "/{date}_{sn}_moran_bv_values.csv"
 
 
 # =============================================================================
@@ -173,6 +184,7 @@ segs_done = get_fns(segs_done_fmt)
 clust_done = get_fns(clust_fmt)
 classif_done = get_fns(classif_fmt)
 coords_done = get_fns(centroid_sciname_fmt)
+global_autocorr_done = get_fns(moran_bv_table_fmt)
 
 # seg_fns_all = get_fns(seg_fmt)
 # props_fns_all = get_fns(props_fmt)
@@ -229,7 +241,7 @@ rule segment:
             sh_arr[:, k, :] = fsi.replace_outlier_shifts(sh_i)
         # Now shift the raw images
         for m in range(M):
-            rgb_fn = rgb_fmt.format(date=date, sn=sn, m=m)
+            rgb_fn = rgb_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
             raws = [fsi.load_raw(fn, m, mtype) for fn in czi_fns]
             raws = [fsi.reshape_aics_image(r) for r in raws]
             # some images have different pixel resolution, correct that
@@ -258,10 +270,10 @@ rule segment:
             )
             ncells += props.shape[0]
 
-            seg_fn = seg_fmt.format(date=date, sn=sn, m=m)
-            props_fn = props_fmt.format(date=date, sn=sn, m=m)
-            plot_fn = plot_fmt.format(date=date, sn=sn, m=m)
-            rgb_fn = rgb_fmt.format(date=date, sn=sn, m=m)
+            seg_fn = seg_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+            props_fn = props_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+            plot_fn = plot_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+            rgb_fn = rgb_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
 
             for f in [seg_fn, props_fn, plot_fn, rgb_fn]:
                 odir = os.path.split(f)[0]
@@ -511,7 +523,7 @@ rule get_coords:
         coords_fn = centroid_sciname_fmt
     run:
         czi_fns = input.czi_fns
-        print(czi_fns)
+        # print(czi_fns)
         # Get bc sciname dict
         pdfn, bc_type = dict_date_pdfn[wildcards.date]
         probe_design = pd.read_csv(pdfn)
@@ -583,8 +595,8 @@ rule get_coords:
 
             # Plot classified tiled image
             tile_shp = (
-                (nrows - 1)*int(im_r) + shp[0], 
-                (ncols - 1)*int(im_c) + shp[1]
+                (nrows - 1)*int(math.ceil(im_r)) + shp[0], 
+                (ncols - 1)*int(math.ceil(im_c)) + shp[1]
             )
             classif_tile = np.zeros((
                 tile_shp[0], tile_shp[1],len(colors[0])
@@ -772,9 +784,168 @@ rule get_coords:
                 'tile': tiles,
             }).to_csv(centroid_sciname_fn)
 
-# rule get_adjacency:
+# # rule global_autocorr:
 #     input:
-#         coords_fn = centroid_sciname_fmt
+#         czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+#         centroid_sciname_fn = centroid_sciname_fmt
 #     output:
-#         adjacency_fn = adjacency_fmt
+#         adjacency_hist_fn = adjacency_hist_fmt,
+#         moran_table_fn = moran_table_fmt,
+#         moran_bv_table_fn = moran_bv_table_fmt,
+#     conda:
+#         'hiprfish_pysal'
 #     run:
+#         from esda.moran import Moran, Moran_BV
+#         from libpysal.weights import W
+#         pdict = config['moran']
+
+#         # Get coords 
+#         centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+#         coords = np.array([eval(c) for c in centroid_sciname["coord"].values])
+#         scinames = centroid_sciname["sciname"].values
+#         scn_unq = np.unique(scinames)
+
+#         # Get adjacency
+#         res_mpix = fsi.get_resolution(input.czi_fns[0])
+#         res_umpix = res_mpix * 1e6
+#         radius_pix = pdict['radius_um'] / res_umpix
+#         neigh = NearestNeighbors(radius=radius_pix)
+#         nbrs = neigh.fit(coords)
+#         nn_dists, nn_inds = nbrs.radius_neighbors(coords)
+
+#         # Plot adjacency
+#         _ = plt.hist([len(ni) for ni in nn_inds])
+#         _ = plt.xlabel(
+#             'Number of cells within ' 
+#             + str(pdict['radius_um']) 
+#             + 'μm (' + str(int(radius_pix)) + ' pixels)'
+#         )
+#         ip.save_fig(output.adjacency_hist_fn)
+
+#         # Build weights matrix
+#         neighbors = {}
+#         for i, (nn_i) in enumerate(nn_inds):
+#             neighbors[i] = [ni for ni in nn_i if ni != i]
+#         w = W(neighbors)
+
+#         # Get morans I
+#         xlim = (0, np.max(coords[:, 1]))
+#         ylim = (0, np.max(coords[:, 0]))
+#         moran_table = defaultdict(list)
+#         for scn in scn_unq:
+#             # calculate morans i
+#             col = dict_sciname_color[scn]
+#             bool_scn = scinames == scn
+#             y = bool_scn * 1
+#             mi = Moran(y, w)
+#             # print(scn, mi.I, mi.p_sim)
+#             moran_table["sciname"].append(scn)
+#             moran_table["I_expected"].append(mi.EI)
+#             moran_table["I_measured"].append(mi.I)
+#             moran_table["p_simulation"].append(mi.p_sim)
+#             # PLot the simluation vs observed
+#             fig, ax = apl.general_plot(
+#                 col=pdict['l_col'], 
+#                 dims=eval(pdict['dims']), 
+#                 lw=pdict['lw'], 
+#                 ft=pdict['ft'], 
+#                 pad=pdict['pad']
+#             )
+#             apl.plot_morans_i_sim_obj(
+#                 ax, mi, lw=pdict['lw'], ft=pdict['ft'], col=col, l_col=pdict['l_col']
+#             )
+#             moran_fn = moran_plot_fmt.format(
+#                 date=wildcards.date, sn=wildcards.sn, scn=scn
+#             )
+#             ip.check_dir(moran_fn)
+#             ip.save_fig(moran_fn)
+#             plt.close()
+#             # Plot the scatter locations
+#             coord_scn = coords[bool_scn]
+#             fig, ax = ip.general_plot(
+#                 col='w', dims=eval(pdict['dims_im']), lw=pdict['lw'], ft=pdict['ft']
+#             )
+#             ax.scatter(coord_scn[:,1], coord_scn[:,0], s=pdict['spot_size'], color=col)
+#             ax.set_xlim(xlim[0], xlim[1])
+#             ax.set_ylim(ylim[0], ylim[1])
+#             ax.invert_yaxis()
+#             ax.set_aspect('equal')
+#             scatter_fn = scatter_plot_fmt.format(
+#                 date=wildcards.date, sn=wildcards.sn, scn=scn
+#             )
+#             ip.check_dir(scatter_fn)
+#             ip.save_fig(scatter_fn, dpi=pdict['dpi'])
+#             plt.close()
+#         pd.DataFrame(moran_table).to_csv(output.moran_table_fn, index=False)
+
+#         # Morans bivariate corrrelation
+#         moran_bv_table = defaultdict(list)
+#         for i, scn0 in enumerate(scn_unq):
+#             for j, scn1 in enumerate(scn_unq):
+#                 if i != j:
+#                     # calculate morans bivariate
+#                     col0 = dict_sciname_color[scn0]
+#                     col1 = dict_sciname_color[scn1]
+#                     bool_scn0 = scinames == scn0
+#                     bool_scn1 = scinames == scn1
+#                     y0 = bool_scn0 * 1
+#                     y1 = bool_scn1 * 1
+#                     mbv = Moran_BV(y0, y1, w)
+#                     moran_bv_table["sciname0"].append(scn0)
+#                     moran_bv_table["sciname1"].append(scn0)
+#                     moran_bv_table["I_expected"].append(mbv.EI_sim)
+#                     moran_bv_table["I_measured"].append(mbv.I)
+#                     moran_bv_table["p_simulation"].append(mbv.p_sim)
+#                     # PLot the simluation vs observed
+#                     fig, ax = apl.general_plot(
+#                         col=pdict['l_col'], 
+#                         dims=eval(pdict['dims']), 
+#                         lw=pdict['lw'], 
+#                         ft=pdict['ft'], 
+#                         pad=pdict['pad']
+#                     )
+#                     apl.plot_morans_i_sim_obj(
+#                         ax, mbv, 
+#                         lw=pdict['lw'], 
+#                         ft=pdict['ft'], 
+#                         col=col0, 
+#                         l_col=pdict['l_col']
+#                     )
+#                     moran_bv_fn = moran_plot_bv_fmt.format(
+#                         date=wildcards.date, sn=wildcards.sn, scn0=scn1, scn1=scn1
+#                     )
+#                     ip.check_dir(moran_bv_fn)
+#                     ip.save_fig(moran_bv_fn)
+#                     plt.close()
+#                     # Plot the scatter locations
+#                     coord_scn0 = coords[bool_scn0]
+#                     coord_scn1 = coords[bool_scn1]
+#                     fig, ax = ip.general_plot(
+#                         col='w', 
+#                         dims=eval(pdict['dims_im']), 
+#                         lw=pdict['lw'], 
+#                         ft=pdict['ft']
+#                     )
+#                     ax.scatter(
+#                         coord_scn0[:,1], 
+#                         coord_scn0[:,0], 
+#                         s=pdict['spot_size'], 
+#                         color=col0
+#                     )
+#                     ax.scatter(
+#                         coord_scn[:,1], 
+#                         coord_scn[:,0], 
+#                         s=pdict['spot_size'], 
+#                         color=col1
+#                         )
+#                     ax.set_xlim(xlim[0], xlim[1])
+#                     ax.set_ylim(ylim[0], ylim[1])
+#                     ax.invert_yaxis()
+#                     ax.set_aspect('equal')
+#                     scatter_bv_fn = scatter_plot_bv_fmt.format(
+#                         date=wildcards.date, sn=wildcards.sn,scn0=scn1, scn1=scn1
+#                     )
+#                     ip.check_dir(scatter_bv_fn)
+#                     ip.save_fig(scatter_bv_fn, dpi=pdict['dpi'])
+#                     plt.close()
+#         pd.DataFrame(moran_bv_table).to_csv(output.moran_bv_table_fn, index=False)
