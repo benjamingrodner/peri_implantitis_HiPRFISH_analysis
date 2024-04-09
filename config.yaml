@@ -53,3 +53,20 @@ fuzzy_box_counting:
   dims: (4,4)
   slope_xloc: 30
 
+multifractal_analysis:
+  box_edge_init_um: 50
+  divide_edgesize: 1.5
+  box_edge_min_um: 5
+  col: 'k'
+  ft: 7
+  dims: (4,4)
+  slope_xloc: 1000
+  qmin: -4
+  qmax: 6
+  cmap: 'tab10'
+
+power_spectrum:
+  step_um: 5
+  radius_um: 10
+  fmin: 0.01
+  fmax: 0.1

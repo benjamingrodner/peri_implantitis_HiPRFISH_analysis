@@ -72,7 +72,6 @@ class RectangleM_new:
             self.rectangle_height = y_range/float(count_row)
         self.num = self.count_column * self.count_row
 
-
     def point_location_sta(self):
         """
         Count the point events in each cell.
@@ -168,3 +167,74 @@ class RectangleM_new:
                 D = 0
             dict_idx_simpson[idx] = D
         return dict_idx_simpson
+
+    def get_partition_values(self, q):
+        self._get_dict_id_labels()
+        dict_idx = {}
+        for idx, labels in self.dict_id_labels.items():
+            labels = np.array(labels)
+            nlab = len(labels)
+            Xs = []
+            for l in np.unique(labels):
+                nl = sum(labels==l)
+                p = nl / nlab
+                if q == 1:
+                    Xs.append(-p * np.log(p))
+                else:
+                    Xs.append(p**q)
+            Xa = np.sum(Xs)
+            dict_idx[idx] = Xa
+        return dict_idx
+
+    def get_partition_values_noreplace(self, q):
+        self._get_dict_id_labels()
+        dict_idx = {}
+        for idx, labels in self.dict_id_labels.items():
+            labels = np.array(labels)
+            nlab = len(labels)
+            Xs = []
+            if nlab >= abs(q):
+                for l in np.unique(labels):
+                    nl = sum(labels==l)
+                    p = nl / nlab
+                    if q == 1:
+                        Xs.append(-p * np.log(p))
+                    else:
+                        if nl >= abs(q):
+                            minus = 0
+                            ns = []
+                            Ns = []
+                            while minus < abs(q):
+                                ns.append(nl - minus)
+                                Ns.append(nlab - minus)
+                                minus += 1
+                            p_ = (np.prod(ns)/np.prod(Ns)) ** np.sign(q)
+                            Xs.append(p_)
+                        else:
+                            Xs.append(0)
+            else:
+                Xs.append(0)
+            Xa = np.sum(Xs)
+            dict_idx[idx] = Xa
+        return dict_idx
+
+
+def get_density_arr(coords_scn, step, radius, radius_um, xlim, ylim):
+    xs = np.arange(xlim[0], xlim[1], step)
+    ys = np.arange(ylim[0], ylim[1], step)
+
+    density_arr = np.zeros((len(ys), len(xs)))
+    for j, x in enumerate(xs):
+        eboolx = (x > (xlim[0] + radius)) * (x < (xlim[1] - radius))
+        if eboolx:
+            for i, y in enumerate(ys):
+                ebooly = (y > (ylim[0] + radius)) * (y < (ylim[1] - radius))
+                if ebooly:
+                    bools = (
+                        (coords_scn[:, 1] > (x - radius))
+                        * (coords_scn[:, 1] < (x + radius))
+                        * (coords_scn[:, 0] > (y - radius))
+                        * (coords_scn[:, 0] < (y + radius))
+                    )
+                    density_arr[i, j] = sum(bools) / (radius_um**2)
+    return density_arr

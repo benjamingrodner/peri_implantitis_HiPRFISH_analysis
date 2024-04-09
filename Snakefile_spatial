@@ -203,7 +203,7 @@ sample_compare_dir = config['output_dir'] + '/compare_samples'
 feature_matrix_fn = sample_compare_dir + '/samples_feature_matrix.csv'
 
 # aggregate_cluster_size
-cluster_size_dict_fn = sample_compare_dir + '/cluster_size_distribution/dict_sample_sciname_clustersize.yaml'
+cluster_size_dict_fn = sample_compare_dir + '/dict_sample_sciname_clustersize.yaml'
 
 # box_counting_dimension
 box_counting_fmt = spatial_dir + '/box_counting/{date}_{sn}_box_counting_regression.csv'
@@ -213,8 +213,15 @@ fuzzy_box_counting_fmt = spatial_dir + '/box_counting/{date}_{sn}_fuzzy_box_coun
 fuzzy_box_counting_curve_fmt = spatial_dir + '/box_counting/{date}_{sn}_fuzzy_box_counting_regression.png'
 
 # aggregate_box_counting
-multispecies_box_count_all_fn = sample_compare_dir + 'box_/multispecies_box_counting_table.csv'
+multispecies_box_count_all_fn = sample_compare_dir + '/multispecies_box_counting_table.csv'
 fuzzy_box_count_all_fn = sample_compare_dir + '/fuzzy_box_counting_table.csv'
+
+# multifractal_analysis
+multifractal_dir = spatial_dir + '/multifractal'
+multifractal_fmt = multifractal_dir + '/{date}_{sn}_multifractal_vals.csv'
+multifractal_curve_pos_fmt = multifractal_dir + '/plots/{date}_{sn}_multifractal_regression_pos.pdf'
+multifractal_curve_neg_fmt = multifractal_dir + '/plots/{date}_{sn}_multifractal_regression_neg.pdf'
+multifractal_all_fn = sample_compare_dir + '/multifractal_zq_values.csv'
 
 # =============================================================================
 # Rule all output
@@ -228,6 +235,7 @@ global_autocorr_done = get_fns(moran_bv_table_fmt)
 clust_size_done = get_fns(power_law_vals_fmt)
 box_counting_done = get_fns(box_counting_fmt)
 multispecies_box_counting_done = get_fns(fuzzy_box_counting_fmt)
+multifractal_done = get_fns(multifractal_fmt)
 
 # seg_fns_all = get_fns(seg_fmt)
 # props_fns_all = get_fns(props_fmt)
@@ -241,8 +249,7 @@ multispecies_box_counting_done = get_fns(fuzzy_box_counting_fmt)
 
 rule all:
     input:
-        multispecies_box_count_all_fn,
-        fuzzy_box_count_all_fn
+        multifractal_all_fn
 
 
 
@@ -942,6 +949,193 @@ rule aggregate_fuzzy_box_counting:
         df_out.index = get_fns('{date}_{sn}')
         df_out.to_csv(output.fuzzy_box_count_all_fn)
 
+rule multifractal_analysis:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        multifractal_fn = multifractal_fmt,
+        multifractal_curve_pos_fn = multifractal_curve_pos_fmt,
+        multifractal_curve_neg_fn = multifractal_curve_neg_fmt
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        # Get adjacency
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+
+        # Get cells window
+        convex_hull = ps.cg.convex_hull(coords.tolist())
+        ch_arr = np.array(to_ccf(convex_hull))
+        window = Window([convex_hull])
+        bbox = window.bbox
+        w_shp = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])
+
+        # get params
+        pdict = config['multifractal_analysis']
+
+        # Get partition functions for varying q
+        pp = PointPattern(coords, window=window)
+        box_edge_um = pdict['box_edge_init_um']
+        qrange = np.arange(pdict['qmin'], pdict['qmax'])
+        counts = []
+        areas = []
+        dict_q_Xams = defaultdict(list)
+        while box_edge_um >= pdict['box_edge_min_um']:
+            box_edge = box_edge_um / res_umpix
+            nxy = np.ceil(w_shp / box_edge).astype(int)
+            for q in qrange:
+                rect = fss.RectangleM_new(
+                    pp, 
+                    count_column = nxy[1], 
+                    count_row = nxy[1],
+                    labels=scinames
+                ).get_partition_values_noreplace(q)
+                Xas = np.array(list(rect.values()))
+                Xam = np.mean(Xas)
+                dict_q_Xams[q].append(Xam)
+            dxy_um = w_shp / nxy * res_umpix
+            area = np.prod(dxy_um)
+            areas.append(area)
+
+            box_edge_um /= pdict['divide_edgesize']
+
+        # Get slopes
+        df_out = defaultdict(list)
+        zqs = []
+        for q in qrange:
+            # Get regression
+            Xams = dict_q_Xams[q]
+            lnc = np.log(Xams) if q != 1 else np.array(Xams)
+            lns = np.log(areas)
+            slope, intercept, r_value, p_value, std_err = stats.linregress(lns, lnc)
+            zq = slope/(1-q) if q != 1 else slope
+
+            # add to df
+            df_out['q'].append(q)
+            df_out['zq'].append(zq)
+            df_out['slope'].append(slope)
+            df_out['intercept'].append(intercept)
+            df_out['r_value'].append(r_value)
+            df_out['r_squared'].append(r_value**2)
+            df_out['p_value'].append(p_value)
+            df_out['std_err'].append(std_err)
+        
+        # Save values
+        pd.DataFrame(df_out).to_csv(output.multifractal_fn, index=False)
+
+        # Plot colors
+        dict_q_col = dict(zip(qrange, plt.get_cmap(pdict['cmap']).colors))
+
+        # Plot positive q curves
+        fig, ax = ip.general_plot(
+            dims=eval(pdict['dims']),
+            ft=pdict['ft'],
+            col=pdict['col'],
+        )
+        for i, q in enumerate(qrange):
+            if q >= 0:
+                # Data points
+                Xams = dict_q_Xams[q]
+                Xams = np.exp(Xams) if q == 1 else Xams
+                col = dict_q_col[q]
+                ax.scatter(areas, Xams, color=col, label=q)
+                # Regression
+                intercept = df_out['intercept'][i]
+                slope = df_out['slope'][i]
+                r_value = df_out['r_value'][i]
+                x = np.array([min(areas), max(areas)])
+                y = math.exp(intercept) * x**slope
+                ax.plot(x, y, color=col)
+                # Text
+                x = pdict['slope_xloc']
+                y = math.exp(intercept) * x**slope
+                ax.text(
+                    x,
+                    y,
+                    (
+                        "Slope = " + str(round(slope, 2)) 
+                        + ",\nR^2 = " + str(round(r_value**2, 4))
+                    ),
+                    ha="left",
+                    va="bottom",
+                    fontsize=pdict['ft'],
+                    color=col
+                )
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel('log(Area)')
+        ax.set_ylabel('log(Partition function)')
+        plt.legend()
+        ip.save_fig(output.multifractal_curve_pos_fn)
+        plt.close()
+
+        # Plot negative q curves
+        fig, ax = ip.general_plot(
+            dims=eval(pdict['dims']),
+            ft=pdict['ft'],
+            col=pdict['col'],
+        )
+        for i, q in enumerate(qrange):
+            if q <= 0:
+                # Data points
+                Xams = dict_q_Xams[q]
+                Xams = np.exp(Xams) if q == 1 else Xams
+                col = dict_q_col[q]
+                ax.scatter(areas, Xams, color=col, label=q)
+                # Regression
+                intercept = df_out['intercept'][i]
+                slope = df_out['slope'][i]
+                r_value = df_out['r_value'][i]
+                x = np.array([min(areas), max(areas)])
+                y = math.exp(intercept) * x**slope
+                ax.plot(x, y, color=col)
+                # Text
+                x = pdict['slope_xloc']
+                y = math.exp(intercept) * x**slope
+                ax.text(
+                    x,
+                    y,
+                    (
+                        "Slope = " + str(round(slope, 2)) 
+                        + ",\nR^2 = " + str(round(r_value**2, 4))
+                    ),
+                    ha="right",
+                    va="bottom",
+                    fontsize=pdict['ft'],
+                    color=col
+                )
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_ylabel('log(Area)')
+        ax.set_xlabel('log(Partition function)')
+        plt.legend()
+        ip.save_fig(output.multifractal_curve_neg_fn)
+        plt.close()
+
+rule aggregate_multifractal:
+    input:
+        multifractal_fns = get_fns(multifractal_fmt)
+    output:
+        multifractal_all_fn = multifractal_all_fn
+    run:
+        pdict = config['multifractal_analysis']
+        qrange = np.arange(pdict['qmin'], pdict['qmax'])
+        zq_list = []
+        for fn in input.multifractal_fns:
+            df = pd.read_csv(fn)
+            zqs = df['zq'].values
+            zq_list.append(zqs)
+
+        df_out = pd.DataFrame(zq_list)
+        df_out.index = get_fns('{date}_{sn}')
+        df_out.columns = qrange
+        df_out.to_csv(output.multifractal_all_fn)
 
 # rule box_counting_dimension_old:
 #     input:

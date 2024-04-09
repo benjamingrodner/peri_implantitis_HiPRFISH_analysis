@@ -1,0 +1,201 @@
+import os
+import re
+import gc
+import sys
+import glob
+import yaml
+import math
+from scipy import stats
+import numpy as np
+import pandas as pd
+import aicspylibczi as aplc
+import matplotlib.pyplot as plt
+from collections import defaultdict
+from matplotlib_scalebar.scalebar import ScaleBar
+
+
+from astropy.io import fits
+from turbustat.statistics import PowerSpectrum
+
+sys.path.append(config['functions_path'])
+import fn_spatial_stats as fss
+
+
+# =============================================================================
+# Functions
+# =============================================================================
+
+def get_input_table():
+    input_table = pd.read_csv(config['input_table'])
+    # input_table.columns = config['input_table_cols']
+    return input_table
+
+
+def get_seg_fns(date, sn, fmt):
+    fns = dict_date_sn_fns[date][sn]
+    M, mtype = fsi.get_ntiles(fns[0])
+    seg_fns = []
+    for m in range(M):
+        seg_fns.append(fmt.format(date=date, sn=sn, m=m))
+    return seg_fns
+
+def get_fns(fmt):
+    fns = []
+    for date, dict_sn_fns in dict_date_sn_fns.items():
+        for sn in dict_sn_fns.keys():
+            fns.append(fmt.format(date=date, sn=sn))
+    return fns
+
+def get_czi_fns(date, sn):
+    return dict_date_sn_fns[date][sn]
+
+
+def get_resolution(fn, dim='X'):
+    czi = aplc.CziFile(fn)
+    for n in czi.meta.iter():
+        if 'Scaling' in n.tag:
+            if dim in n.tag:
+                resolution = float(n.text)
+    return resolution
+
+# =============================================================================
+# Setup
+# =============================================================================
+
+# args = sys.argv
+# config_fn = args[args.index("--configfile") + 1]
+
+input_table = get_input_table()
+filenames = input_table['filenames']
+
+dict_date_sn_fns = defaultdict(lambda: defaultdict(list))
+for fn in filenames:
+    bn = os.path.split(fn)[1]
+    date, bn = re.split('(?<=^\d{4}_\d{2}_\d{2})_', bn)
+    sn, ext = re.split("(?<=fov_\d{2})", bn)
+    dict_date_sn_fns[date][sn].append(fn)
+
+out_dir = config['output_dir'] + "/{date}/{date}_{sn}"
+spatial_dir = out_dir + '/spatial_statistics'
+
+# get coords
+sciname_list = [
+    'Corynebacterium',
+    'Actinomyces',
+    'Rothia',
+    'Capnocytophaga',
+    'Prevotella',
+    'Porphyromonas',
+    'Streptococcus',
+    'Gemella',
+    'Veillonella',
+    'Selenomonas',
+    'Lautropia',
+    'Neisseriaceae',
+    'Pasteurellaceae',
+    'Campylobacter',
+    'Fusobacterium',
+    'Leptotrichia',
+    'Treponema',
+    'TM7'
+]
+colors = plt.get_cmap('tab20').colors
+# colors = [c + (1,) for c in colors]
+dict_sciname_color = dict(zip(sciname_list, colors))
+dict_sciname_color['Neisseria'] = dict_sciname_color['Neisseriaceae']
+dict_sciname_color['Saccharibacteria'] = dict_sciname_color['TM7']
+out_fmt_classif = out_dir + "/classif"
+centroid_sciname_fmt = out_fmt_classif + '/{date}_{sn}_centroid_sciname.csv'
+
+# power_spectrum
+power_spectrum_dir = spatial_dir + '/power_spectrum'
+power_spectrum_fmt = power_spectrum_dir + '/{date}_{sn}_power_spectrum_fit.csv'
+
+
+# =============================================================================
+# Rule all output
+# =============================================================================
+
+power_spectrum_done = get_fns(power_spectrum_fmt)
+
+# =============================================================================
+# Snake rules
+# =============================================================================
+
+rule all:
+    input:
+        power_spectrum_done
+
+
+rule power_spectrum:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        power_spectrum_fn = power_spectrum_fmt
+    run: 
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+        
+        # get params
+        pdict = config['power_spectrum']
+
+        # Pixel resolution
+        res_mpix = get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+        step = pdict['step_um'] / res_umpix
+        radius = pdict['radius_um'] / res_umpix
+        xlim = (0, np.max(coords[:, 1]))
+        ylim = (0, np.max(coords[:, 0]))
+        hdr = fits.PrimaryHDU().header
+        hdr['CDELT1'] = pdict['step_um']
+        hdr['CDELT2'] = pdict['step_um']
+
+        # Get values
+        df_out = defaultdict(list)
+        for scn in scn_unq:
+            # Setup
+            col = dict_sciname_color[scn]
+            coords_scn = coords[scinames == scn]
+
+            # Get density
+            density_arr = fss.get_density_arr(
+                coords_scn, step, radius, pdict['radius_um'], xlim, ylim
+            )
+            pspec = PowerSpectrum(density_arr, header=hdr)
+            try:
+                _ = pspec.run()
+                # slope
+                freqs = pspec.freqs.value / pdict['step_um']
+                bool_l = freqs > pdict['fmin']
+                bool_u = freqs < pdict['fmax']
+                freqs_clip = freqs[bool_l * bool_u]
+                ps1D_clip = pspec.ps1D[bool_l * bool_u]
+                lnc = np.log(freqs_clip)
+                lnp = np.log(ps1D_clip)
+                slope, intercept, r_value, p_value, std_err = stats.linregress(lnc, lnp)
+                df_out['sciname'].append(scn)
+                df_out['slope'].append(slope)
+                df_out['intercept'].append(intercept)
+                df_out['r_value'].append(r_value)
+                df_out['r_squared'].append(r_value**2)
+                df_out['p_value'].append(p_value)
+                df_out['std_err'].append(std_err)
+                print('len(coords_scn)',len(coords_scn))
+            except:
+                print('\n\n\nLOOK HERE --> sample,',wildcards.date,wildcards.sn)
+                print('      --> sciname:', scn, '\n\n\n')
+                print('len(coords_scn)',len(coords_scn))
+                pspec.compute_pspec()
+                print('sum(pspec._ps2D > 0)',sum(pspec._ps2D > 0))
+                print('sum(pspec._ps2D == 0)',sum(pspec._ps2D == 0))
+                print('sum(pspec._ps2D < 0)',sum(pspec._ps2D < 0))
+            # Power spectrum
+
+        
+        # Save
+        pd.DataFrame(df_out).to_csv(output.power_spectrum_fn, index=False)
