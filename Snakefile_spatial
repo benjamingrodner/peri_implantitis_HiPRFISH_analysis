@@ -147,9 +147,10 @@ dict_date_pdfn = {
 }
 out_fmt_classif = out_dir + "/classif"
 spec_classif_fmt = out_fmt_classif + "/spectra_plots/{date}_{sn}_spec_clust_{cl}.png"
-classif_fmt = out_fmt_classif + "/{date}_{sn}_dict_cluster_barcode.yaml"
+# classif_fmt = out_fmt_classif + "/{date}_{sn}_dict_cluster_barcode.yaml"
+out_fmt_classif = out_dir + "/classif"
 
-# get coords
+# recolor
 sciname_list = [
     'Corynebacterium',
     'Actinomyces',
@@ -175,9 +176,15 @@ colors = plt.get_cmap('tab20').colors
 dict_sciname_color = dict(zip(sciname_list, colors))
 dict_sciname_color['Neisseria'] = dict_sciname_color['Neisseriaceae']
 dict_sciname_color['Saccharibacteria'] = dict_sciname_color['TM7']
-classif_plot_fmt = out_dir_plot + '/{date}_{sn}_M_{m}_classif.png'
-classif_plot_all_fmt = out_dir_plot + '/{date}_{sn}_classif_alltiles.png'
-centroid_sciname_fmt = out_fmt_classif + '/{date}_{sn}_centroid_sciname.csv'
+
+# get coords
+# classif_plot_fmt = out_dir_plot + '/{date}_{sn}_M_{m}_classif.png'
+# classif_plot_all_fmt = out_dir_plot + '/{date}_{sn}_classif_alltiles.png'
+# out_dir_coords = out_dir + "/coords"
+# centroid_sciname_fmt = out_dir_coords + '/{date}_{sn}_centroid_sciname.csv'
+out_dir_coords = out_fmt_classif + "/coords_240705_cosdist"
+centroid_sciname_fmt = out_dir_coords + '/{date}_{sn}_centroid_sciname.csv'
+
 
 # global_autocorr
 spatial_dir = out_dir + '/spatial_statistics'
@@ -214,7 +221,7 @@ fuzzy_box_counting_curve_fmt = spatial_dir + '/box_counting/{date}_{sn}_fuzzy_bo
 
 # aggregate_box_counting
 multispecies_box_count_all_fn = sample_compare_dir + '/multispecies_box_counting_table.csv'
-fuzzy_box_count_all_fn = sample_compare_dir + '/fuzzy_box_counting_table.csv'
+fuzzy_box_count_all_fn = sample_compare_dir + '/20240506/fuzzy_box_counting_table.csv'
 
 # multifractal_analysis
 multifractal_dir = spatial_dir + '/multifractal'
@@ -223,19 +230,26 @@ multifractal_curve_pos_fmt = multifractal_dir + '/plots/{date}_{sn}_multifractal
 multifractal_curve_neg_fmt = multifractal_dir + '/plots/{date}_{sn}_multifractal_regression_neg.pdf'
 multifractal_all_fn = sample_compare_dir + '/multifractal_zq_values.csv'
 
+# local diversity
+local_diversity_dict_fmt = multifractal_dir + '/{date}_{sn}_dict_area_q_partition_vals.yaml'
+local_diversity_nocell_nan_dict_fmt = multifractal_dir + '/{date}_{sn}_dict_area_q_partition_vals_nocell_nan.yaml'
+
 # =============================================================================
 # Rule all output
 # =============================================================================
 
 segs_done = get_fns(segs_done_fmt)
 clust_done = get_fns(clust_fmt)
-classif_done = get_fns(classif_fmt)
+# classif_done = get_fns(classif_fmt)
 coords_done = get_fns(centroid_sciname_fmt)
 global_autocorr_done = get_fns(moran_bv_table_fmt)
 clust_size_done = get_fns(power_law_vals_fmt)
 box_counting_done = get_fns(box_counting_fmt)
 multispecies_box_counting_done = get_fns(fuzzy_box_counting_fmt)
+fuzzy_box_counting_done = get_fns(fuzzy_box_counting_fmt)
 multifractal_done = get_fns(multifractal_fmt)
+local_diversity_done = get_fns(local_diversity_dict_fmt)
+local_diversity_nocell_nan_done = get_fns(local_diversity_nocell_nan_dict_fmt)
 
 # seg_fns_all = get_fns(seg_fmt)
 # props_fns_all = get_fns(props_fmt)
@@ -249,7 +263,10 @@ multifractal_done = get_fns(multifractal_fmt)
 
 rule all:
     input:
-        multifractal_all_fn
+        fuzzy_box_counting_done,
+        local_diversity_done,
+        local_diversity_nocell_nan_done
+
 
 
 
@@ -1136,6 +1153,120 @@ rule aggregate_multifractal:
         df_out.index = get_fns('{date}_{sn}')
         df_out.columns = qrange
         df_out.to_csv(output.multifractal_all_fn)
+
+rule local_diversity:
+    input: 
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        local_diversity_dict_fn = local_diversity_dict_fmt,
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        # Get adjacency
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+
+        # Get cells window
+        convex_hull = ps.cg.convex_hull(coords.tolist())
+        ch_arr = np.array(to_ccf(convex_hull))
+        window = Window([convex_hull])
+        bbox = window.bbox
+        w_shp = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])
+
+        # get params
+        pdict = config['multifractal_analysis']
+
+        # Get partition functions for varying q
+        pp = PointPattern(coords, window=window)
+        box_edge_um = pdict['box_edge_init_um']
+        qrange = np.arange(pdict['qmin'], pdict['qmax'])
+        counts = []
+        areas = []
+        dict_a_q_Xas = defaultdict(dict)
+        while box_edge_um >= pdict['box_edge_min_um']:
+            print(box_edge_um)
+            box_edge = box_edge_um / res_umpix
+            nxy = np.ceil(w_shp / box_edge).astype(int)
+            dxy_um = w_shp / nxy * res_umpix
+            area = np.prod(dxy_um)
+            for q in qrange:
+                rect = fss.RectangleM_new(
+                    pp, 
+                    count_column = nxy[1], 
+                    count_row = nxy[1],
+                    labels=scinames
+                ).get_partition_values_noreplace(q)
+                Xas = list(rect.values())
+                dict_a_q_Xas[area][q] = Xas
+
+            box_edge_um /= pdict['divide_edgesize']
+        
+        with open(output.local_diversity_dict_fn, 'w') as f:
+            yaml.dump(dict_a_q_Xas, f, default_flow_style=False)        
+
+rule local_diversity_nocell_nan:
+    input: 
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        local_diversity_nocell_nan_dict_fn = local_diversity_nocell_nan_dict_fmt,
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames = centroid_sciname["sciname"].values
+        scn_unq = np.unique(scinames)
+
+        # Get adjacency
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6
+
+        # Get cells window
+        convex_hull = ps.cg.convex_hull(coords.tolist())
+        ch_arr = np.array(to_ccf(convex_hull))
+        window = Window([convex_hull])
+        bbox = window.bbox
+        w_shp = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])
+
+        # get params
+        pdict = config['multifractal_analysis']
+
+        # Get partition functions for varying q
+        pp = PointPattern(coords, window=window)
+        box_edge_um = pdict['box_edge_init_um']
+        qrange = np.arange(pdict['qmin'], pdict['qmax'])
+        counts = []
+        areas = []
+        dict_a_q_Xas = defaultdict(dict)
+        while box_edge_um >= pdict['box_edge_min_um']:
+            print(box_edge_um)
+            box_edge = box_edge_um / res_umpix
+            nxy = np.ceil(w_shp / box_edge).astype(int)
+            dxy_um = w_shp / nxy * res_umpix
+            area = np.prod(dxy_um)
+            for q in qrange:
+                rect = fss.RectangleM_new(
+                    pp, 
+                    count_column = nxy[1], 
+                    count_row = nxy[1],
+                    labels=scinames
+                ).get_partition_values_noreplace(q)
+                Xas = list(rect.values())
+                dict_a_q_Xas[area][q] = Xas
+
+            box_edge_um /= pdict['divide_edgesize']
+        
+        with open(output.local_diversity_nocell_nan_dict_fn, 'w') as f:
+            yaml.dump(dict_a_q_Xas, f, default_flow_style=False)        
+
+
 
 # rule box_counting_dimension_old:
 #     input:

@@ -105,7 +105,9 @@ dict_sciname_color = dict(zip(sciname_list, colors))
 dict_sciname_color['Neisseria'] = dict_sciname_color['Neisseriaceae']
 dict_sciname_color['Saccharibacteria'] = dict_sciname_color['TM7']
 out_fmt_classif = out_dir + "/classif"
-centroid_sciname_fmt = out_fmt_classif + '/{date}_{sn}_centroid_sciname.csv'
+# centroid_sciname_fmt = out_fmt_classif + '/{date}_{sn}_centroid_sciname.csv'
+out_dir_coords = out_dir + "/coords"
+centroid_sciname_fmt = out_dir_coords + '/{date}_{sn}_centroid_sciname.csv'
 
 # power_spectrum
 power_spectrum_dir = spatial_dir + '/power_spectrum'

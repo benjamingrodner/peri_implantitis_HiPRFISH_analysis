@@ -1,6 +1,11 @@
 functions_path: ../../../manuscripts/mgefish/code/functions
 # input_table: input_table_test.csv
-input_table: input_table_nonproblem.csv
+# input_table: input_table_nonproblem.csv
+# input_table: input_table_20240506.csv
+# input_table: input_table_problemchild.csv
+# input_table: input_table_problem1.csv
+# input_table: input_table_problem2.csv
+input_table: input_table_all.csv
 output_dir: ../outputs/segmentation_2024_03_07
 max_shift: 500
 gauss: 3
@@ -8,8 +13,12 @@ diff_gauss: (2, 3)
 bg_smoothing: 5
 n_clust_bg: 10
 top_n_clust_bg: 9
-imin: 2
-dpi: 500
+im_inches: 2.3622
+im_ft: 7
+clips: (0,0.75)
+rgb_clips: [[0,0.1],[0,0.1],[0,0.1]]
+dpi: 850
+cb_col: 'w'
 n_clust: 25
 spec_dims: (10,5)
 umap_dims: (5,5)
@@ -17,6 +26,19 @@ s_u: 1
 alpha_u: 0.25
 cmap_u: 'Spectral'
 ref_dir: "../../../manuscripts/mgefish/data/unused/fig_5/HiPRFISH_reference_spectra"
+
+plot_spectra:
+  xs: [3, 7, 10, 24, 27, 29, 31, 33, 43, 47,57, 60]
+
+
+dict_clip:
+  2023_02_18_hsdm_group_IV_patient_1_fov_01: (0.0.25)
+
+color_legend:
+  label_color: 'k'
+  ft: 8
+  dims: (1.5,2.5)
+
 moran:
   radius_um: 3
   lw: 1
@@ -54,7 +76,7 @@ fuzzy_box_counting:
   slope_xloc: 30
 
 multifractal_analysis:
-  box_edge_init_um: 50
+  box_edge_init_um: 150
   divide_edgesize: 1.5
   box_edge_min_um: 5
   col: 'k'

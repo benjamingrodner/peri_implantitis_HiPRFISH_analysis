@@ -199,6 +199,8 @@ class RectangleM_new:
                     p = nl / nlab
                     if q == 1:
                         Xs.append(-p * np.log(p))
+                    elif q == 0:
+                        Xs.append(1)
                     else:
                         if nl >= abs(q):
                             minus = 0
@@ -218,6 +220,42 @@ class RectangleM_new:
             dict_idx[idx] = Xa
         return dict_idx
 
+    def get_partition_values_noreplace_nocell_nan(self, q):
+        self._get_dict_id_labels()
+        dict_idx = {}
+        for idx, labels in self.dict_id_labels.items():
+            labels = np.array(labels)
+            nlab = len(labels)
+            if nlab > 0:
+                Xs = []
+                if nlab >= abs(q):
+                    for l in np.unique(labels):
+                        nl = sum(labels==l)
+                        p = nl / nlab
+                        if q == 1:
+                            Xs.append(-p * np.log(p))
+                        elif q == 0:
+                            Xs.append(1)
+                        else:
+                            if nl >= abs(q):
+                                minus = 0
+                                ns = []
+                                Ns = []
+                                while minus < abs(q):
+                                    ns.append(nl - minus)
+                                    Ns.append(nlab - minus)
+                                    minus += 1
+                                p_ = (np.prod(ns)/np.prod(Ns)) ** np.sign(q)
+                                Xs.append(p_)
+                            else:
+                                Xs.append(0)
+                else:
+                    Xs.append(0)
+                Xa = np.sum(Xs)
+                dict_idx[idx] = Xa
+            else:
+                dict_idx[idx] = np.nan
+        return dict_idx
 
 def get_density_arr(coords_scn, step, radius, radius_um, xlim, ylim):
     xs = np.arange(xlim[0], xlim[1], step)

@@ -77,6 +77,7 @@ for fn in filenames:
     dict_date_sn_fns[date][sn].append(fn)
 
 out_dir = config['output_dir'] + "/{date}/{date}_{sn}"
+sample_compare_dir = config['output_dir'] + '/compare_samples'
 
 # Segment
 out_dir_seg = out_dir + "/segs"
@@ -87,6 +88,12 @@ props_fmt = out_dir_seg + ofmt + "_props.csv"
 plot_fmt = out_dir_plot + ofmt + "_seg_plot.png"
 rgb_fmt = out_dir_plot + ofmt + "_rgb_plot.png"
 segs_done_fmt = out_dir + "/snakemake_segment_done.txt"
+
+# get_rgb
+rgb_dir = sample_compare_dir + '/rgbs/240415'
+rgb_m_plot_fmt = rgb_dir + '/{date}_{sn}_M_{m}_rgb.png'
+rgb_all_plot_fmt = rgb_dir + '/{date}_{sn}_alltiles_rgb.png'
+rgb_done_fmt = out_dir + "/snakemake_get_rgb_done.txt"
 
 # Cluster
 out_fmt_clust = out_dir + "/cluster/{date}_{sn}"
@@ -181,6 +188,7 @@ moran_bv_table_fmt = moran_bv_dir + "/{date}_{sn}_moran_bv_values.csv"
 # =============================================================================
 
 segs_done = get_fns(segs_done_fmt)
+rgb_done = get_fns(rgb_done_fmt)
 clust_done = get_fns(clust_fmt)
 classif_done = get_fns(classif_fmt)
 coords_done = get_fns(centroid_sciname_fmt)
@@ -198,7 +206,7 @@ global_autocorr_done = get_fns(moran_bv_table_fmt)
 
 rule all:
     input:
-        coords_done
+        rgb_done
 
 
 rule segment:
@@ -317,6 +325,299 @@ rule segment:
         # rgb_fns = lambda wildcards: get_seg_fns(
         #     f'{wildcards.date}', f'{wildcards.sn}', rgb_fmt
         # ),
+
+rule get_rgb:
+    input:
+        lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}')
+    output:
+        rgb_done_fn = rgb_done_fmt,
+    run:
+        # Get number of tiles or scenes
+        M, mtype = fsi.get_ntiles(input[0])
+        # Get the resolutions
+        resolutions = [fsi.get_resolution(fn) for fn in input]
+        # Get the lasers
+        lasers = [fsi.get_laser(fn) for fn in input]
+        # remove 405 channel
+        czi_fns = [fn for fn, l in zip(input, lasers) if l != 405]
+        resolutions = [r for r, l in zip(resolutions, lasers) if l != 405]
+        lasers = [l for l in lasers if l != 405]
+        czi_fns = [x for _, x in sorted(zip(lasers, czi_fns))]
+        resolutions = [x for _, x in sorted(zip(lasers, resolutions))]
+        lasers = sorted(lasers)
+        # Get shifts
+        # shifts = []
+        rgbs = []
+        for m in range(M):
+            raws = [fsi.load_raw(fn, m, mtype) for fn in czi_fns]
+            raws = [fsi.reshape_aics_image(r) for r in raws]
+            # some images have different pixel resolution, correct that
+            raws = fsi.match_resolutions_and_size(raws, resolutions)
+            image_max_norm = [fsi.max_norm(r) for r in raws]
+            sh = fsi._get_shift_vectors(image_max_norm)
+            # print(sh)
+            # shifts.append(sh)
+            raws = fsi._shift_images(
+                raws, sh, max_shift=config['max_shift']
+            )
+            image_max_norm = [fsi.max_norm(r, type='sum') for r in raws]
+            rgbs.append(np.dstack(image_max_norm)[:,:,:3])
+        
+        # Create tile
+        # Get upper left corners for each tile
+        res_umpix = resolutions[0] * 1e6
+        if mtype == 'M':
+            ncols = int(fsi.get_metadata_value(czi_fns[0], 'TilesX')[0])
+            nrows = int(fsi.get_metadata_value(czi_fns[0], 'TilesY')[0])
+            overl = float(fsi.get_metadata_value(
+                czi_fns[0], 'TileAcquisitionOverlap'
+            )[0])
+            cols = np.tile(np.arange(ncols), nrows)
+            rows = np.repeat(np.arange(nrows), ncols)
+            rgb = rgbs[0]
+            # seg = np.load(seg_fns[0])
+            shp = np.array(rgb.shape[:2])
+            im_r, im_c = shp - shp * overl
+            ul_corners = []
+            for m in range(M):
+                c, r = cols[m], rows[m]
+                ulc = np.array([r * im_r, c * im_c])
+                ul_corners.append(ulc)
+
+            # Plot classified tiled image
+            tile_shp = (
+                (nrows - 1)*int(math.ceil(im_r)) + shp[0], 
+                (ncols - 1)*int(math.ceil(im_c)) + shp[1]
+            )
+            # classif_tile = np.zeros((
+            #     tile_shp[0], tile_shp[1],len(colors[0])
+            # ))
+            # sum_tile = np.zeros((tile_shp[0], tile_shp[1]))
+            rgb_tile = np.zeros((tile_shp[0], tile_shp[1], 3))
+            # Get cell absolute locations
+            # dict_ind_centroid_sciname = {}
+            ul_corners = np.array(ul_corners)
+            r_lims = np.unique(ul_corners[:,0])
+            c_lims = np.unique(ul_corners[:,1])
+            for m in range(M):
+                # Get image corner values
+                c, r = cols[m], rows[m]
+                ulc = ul_corners[m]
+                # Get limits to remove cells from overlap
+                r_lim, c_lim = [1e15]*2
+                if r < np.max(rows):
+                    r_lim = r_lims[r+1]
+                if c < np.max(cols):
+                    c_lim = c_lims[c+1]
+
+                # # Adjust cell locations 
+                # prop = pd.read_csv(prop_fns[m])
+                # # Centroid
+                # centroids = np.array([eval(c) for c in prop['centroid']])
+                # centroids += ulc
+                # bool_clim = centroids[:,1] < c_lim
+                # bool_rlim = centroids[:,0] < r_lim
+                # prop['centroid_adj'] = centroids.tolist()
+                # # Bbox
+                # bboxes = np.array([eval(b) for b in prop['bbox']])
+                # bboxes += np.tile(ulc, 2).astype(int)
+                # prop['bbox_adj'] = bboxes.tolist()
+
+                # # Filter based on location
+                # prop_filt = prop[bool_rlim*bool_clim]
+
+                # Plot classif
+                # seg = np.load(seg_fns[m])
+                rgb = rgbs[m]
+                # dict_lab_col = {}
+                # dict_lab_bbox = {}
+                # for i, row in prop_filt.iterrows():
+                #     lab = row['label']
+                #     bbox = row['bbox']
+                #     centroid = row['centroid_adj']
+                #     ind = dict_m_lab_ind[m][lab]
+                #     cl = clust_agg[ind]
+                #     bc = dict_cl_bc[cl]
+                #     sciname = dict_bc_sciname[bc]
+                #     color = dict_sciname_color[sciname]
+                #     dict_lab_col[lab] = color
+                #     dict_ind_centroid_sciname[ind] = [centroid, sciname, m]
+                #     dict_lab_bbox[lab] = bbox
+                # classif_rgb = sf.seg_2_rgb(
+                #     seg, dict_lab_col, dict_lab_bbox
+                # )
+                # # Save plot
+                # fig, ax, cbar = ip.plot_image(
+                #     classif_rgb, 
+                #     im_inches=config['imin'], 
+                #     scalebar_resolution=res_umpix
+                # )
+                # classif_plot_fn = classif_plot_fmt.format(
+                #     date=wildcards.date, sn=wildcards.sn, m=m
+                # )
+                # d = os.path.split(classif_plot_fn)[0]
+                # if not os.path.exists(d):
+                #     os.makedirs(d)
+                #     print('Made dir:', d)
+                # plt.figure(fig)
+                # ip.save_fig(classif_plot_fn, dpi=config['dpi'], bbox_inches=0)   
+                # plt.close()
+
+                # Write to all tiles image
+                cr_shp = rgb.shape[:2]
+                ulc = [int(c) for c in ulc]
+                # print(ulc, cr_shp)
+                rgb_tile[ulc[0]:ulc[0] + cr_shp[0], ulc[1]:ulc[1] + cr_shp[1], :] = rgb
+                # classif_tile[ulc[0]:ulc[0] + cr_shp[0], ulc[1]:ulc[1] + cr_shp[1], :] = classif_rgb
+
+            # Save RGB
+            fig, ax, cbar = ip.plot_image(
+                rgb_tile, 
+                im_inches=config['imin']*np.max(rows), 
+                scalebar_resolution=res_umpix
+            )            
+            rgb_all_plot_fn = rgb_all_plot_fmt.format(date=wildcards.date, sn=wildcards.sn)
+            # classif_plot_all_fn = classif_plot_all_fmt.format(date=wildcards.date, sn=wildcards.sn)
+            d = os.path.split(rgb_all_plot_fn)[0]
+            # d = os.path.split(classif_plot_all_fn)[0]
+            if not os.path.exists(d):
+                os.makedirs(d)
+                print('Made dir:', d)
+            plt.figure(fig)
+            ip.save_fig(rgb_all_plot_fn, dpi=config['dpi'], bbox_inches=0)
+            plt.close()  
+                # # Plot sum 
+                # reg = np.load(reg_fns[m])
+                # reg_sum = np.sum(reg, axis=2)
+                # sum_tile[ulc[0]:ulc[0] + cr_shp[0], ulc[1]:ulc[1] + cr_shp[1]] = reg_sum
+            # Plot all tiles together
+            # fig, ax, cbar = ip.plot_image(
+            #     classif_tile, 
+            #     im_inches=config['imin']*np.max(rows), 
+            #     scalebar_resolution=res_umpix
+            # )
+        else:
+            # dict_ind_centroid_sciname = {}
+            for m in range(M):
+                # # Adjust cell locations 
+                # prop = pd.read_csv(prop_fns[m])
+                # # Centroid
+                # centroids = np.array([eval(c) for c in prop['centroid']])
+                # # Bbox
+                # bboxes = np.array([eval(b) for b in prop['bbox']])
+
+                # Plot classif
+                # seg = np.load(seg_fns[m])
+                rgb = rgbs[m]
+                # dict_lab_col = {}
+                # dict_lab_bbox = {}
+                # for i, row in prop.iterrows():
+                #     lab = row['label']
+                #     bbox = row['bbox']
+                #     centroid = row['centroid']
+                #     ind = dict_m_lab_ind[m][lab]
+                #     cl = clust_agg[ind]
+                #     bc = dict_cl_bc[cl]
+                #     sciname = dict_bc_sciname[bc]
+                #     color = dict_sciname_color[sciname]
+                #     dict_lab_col[lab] = color
+                #     dict_ind_centroid_sciname[ind] = [centroid, sciname, m]
+                #     dict_lab_bbox[lab] = bbox
+                # classif_rgb = sf.seg_2_rgb(
+                #     seg, dict_lab_col, dict_lab_bbox
+                # )
+                # Save plot
+                fig, ax, cbar = ip.plot_image(
+                    rgb, 
+                    im_inches=config['imin'], 
+                    scalebar_resolution=res_umpix
+                )
+                rgb_m_plot_fn = rgb_m_plot_fmt.format(
+                    date=wildcards.date, sn=wildcards.sn, m=m
+                )
+                d = os.path.split(rgb_m_plot_fn)[0]
+                if not os.path.exists(d):
+                    os.makedirs(d)
+                    print('Made dir:', d)
+                plt.figure(fig)
+                ip.save_fig(rgb_m_plot_fn, dpi=config['dpi'], bbox_inches=0)   
+                # ip.save_fig(classif_plot_fn, dpi=config['dpi'], bbox_inches=0)   
+                plt.close()
+        
+        
+        with open(output.rgb_done_fn, 'w') as f:
+            f.write('snakemake rule get_rgb done')
+        # # # Some of the shifts are clearly wrong, fix those
+        # # sh_arr = np.array(shifts)
+        # # for k in range(1, len(lasers)):
+        # #     sh_i = sh_arr[:, k, :]
+        # #     # print("Shifts", lasers[k], ":")
+        # #     # print(sh_i)
+        # #     # address large deviatinos from typical
+        # #     sh_arr[:, k, :] = fsi.replace_outlier_shifts(sh_i)
+        # # Now shift the raw images
+        # for m in range(M):
+        #     rgb_fn = rgb_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+        #     raws = [fsi.load_raw(fn, m, mtype) for fn in czi_fns]
+        #     raws = [fsi.reshape_aics_image(r) for r in raws]
+        #     # some images have different pixel resolution, correct that
+        #     raws = fsi.match_resolutions_and_size(raws, resolutions)
+        #     raws_shift = fsi._shift_images(
+        #         raws, sh_arr[m, :, :], max_shift=config['max_shift']
+        #     )
+        #     stack = np.dstack(raws_shift)
+        #     stack_sum = np.sum(stack, axis=2)
+        #     pre = sf.pre_process(
+        #         stack_sum, 
+        #         gauss=config['gauss'], 
+        #         diff_gauss=eval(config['diff_gauss'])
+        #         )
+        #     mask = sf.get_background_mask(
+        #         stack_sum,
+        #         bg_smoothing=config['bg_smoothing'],
+        #         n_clust_bg=config['n_clust_bg'],
+        #         top_n_clust_bg=config['top_n_clust_bg'],
+        #     )
+        #     seg = sf.segment(pre, mask)
+        #     props = sf.measure_regionprops(seg, stack_sum)
+        #     spec = fsi.get_cell_average_spectra(seg, stack)
+        #     props = props.merge(
+        #         pd.DataFrame(spec), left_index=True, right_index=True
+        #     )
+        #     ncells += props.shape[0]
+
+        #     seg_fn = seg_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+        #     props_fn = props_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+        #     plot_fn = plot_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+        #     rgb_fn = rgb_fmt.format(date=wildcards.date, sn=wildcards.sn, m=m)
+
+        #     for f in [seg_fn, props_fn, plot_fn, rgb_fn]:
+        #         odir = os.path.split(f)[0]
+        #         if not os.path.exists(odir):
+        #             os.makedirs(odir)
+        #             print("Made dir:", odir)
+
+        #     np.save(seg_fn, seg)
+        #     print("Wrote:", seg_fn)
+        #     props.to_csv(props_fn, index=False)
+        #     print("Wrote:", props_fn)
+            
+        #     # ip.plot_image(stack_sum, cmap="inferno", im_inches=10)
+        #     fig, ax, _ = ip.plot_image(ip.seg2rgb(seg), im_inches=config['imin'])
+        #     plt.figure(fig)
+        #     ip.save_fig(plot_fn, dpi=config['dpi'], bbox_inches=0)
+        #     plt.close()
+        #     print("Wrote:", plot_fn)
+
+        #     rgb = np.dstack([fsi.max_norm(r, type='sum') for r in raws_shift])
+        #     rgb = rgb[:,:,:3]
+        #     fig, ax, _ = ip.plot_image(rgb, im_inches=config['imin'])
+        #     plt.figure(fig)
+        #     ip.save_fig(rgb_fn, dpi=config['dpi'], bbox_inches=0)
+        #     plt.close()
+        #     print("Wrote:", rgb_fn)
+        
+
 
 
 
@@ -575,7 +876,7 @@ rule get_coords:
 
         # Get upper left corners for each tile
         M, mtype = fsi.get_ntiles(czi_fns[0])
-        res_umpix = fsi.get_resolution(czi_fns[0])
+        res_umpix = fsi.get_resolution(czi_fns[0]) * 1e6
         if mtype == 'M':
             ncols = int(fsi.get_metadata_value(czi_fns[0], 'TilesX')[0])
             nrows = int(fsi.get_metadata_value(czi_fns[0], 'TilesY')[0])
@@ -783,6 +1084,7 @@ rule get_coords:
                 'sciname': scinames,
                 'tile': tiles,
             }).to_csv(centroid_sciname_fn)
+
 
 # # rule global_autocorr:
 #     input:
