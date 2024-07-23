@@ -92,3 +92,8 @@ power_spectrum:
   radius_um: 10
   fmin: 0.01
   fmax: 0.1
+
+beta_diversity:
+  radii_um: [5,10,20]
+  n_pairs: 10000
+  dist_limit: 200

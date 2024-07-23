@@ -20,7 +20,7 @@ import yaml
 from scipy.spatial.distance import squareform, pdist
 from sklearn.cluster import AgglomerativeClustering
 # import umap
-from scipy.spatial.distance import squareform, pdist, cdist
+from scipy.spatial.distance import squareform, pdist, cdist, euclidean, braycurtis
 from sklearn.neighbors import NearestNeighbors
 import math
 import hdbscan
@@ -234,6 +234,10 @@ multifractal_all_fn = sample_compare_dir + '/multifractal_zq_values.csv'
 local_diversity_dict_fmt = multifractal_dir + '/{date}_{sn}_dict_area_q_partition_vals.yaml'
 local_diversity_nocell_nan_dict_fmt = multifractal_dir + '/{date}_{sn}_dict_area_q_partition_vals_nocell_nan.yaml'
 
+# beta_diversity
+beta_diversity_fmt = out_dir + '/beta_diversity/{date}_{sn}_dict_radius_distance_bray_curtis_mean.yaml'
+
+
 # =============================================================================
 # Rule all output
 # =============================================================================
@@ -250,6 +254,7 @@ fuzzy_box_counting_done = get_fns(fuzzy_box_counting_fmt)
 multifractal_done = get_fns(multifractal_fmt)
 local_diversity_done = get_fns(local_diversity_dict_fmt)
 local_diversity_nocell_nan_done = get_fns(local_diversity_nocell_nan_dict_fmt)
+beta_diversity_done = get_fns(beta_diversity_fmt)
 
 # seg_fns_all = get_fns(seg_fmt)
 # props_fns_all = get_fns(props_fmt)
@@ -265,7 +270,8 @@ rule all:
     input:
         fuzzy_box_counting_done,
         local_diversity_done,
-        local_diversity_nocell_nan_done
+        local_diversity_nocell_nan_done,
+        beta_diversity_done
 
 
 
@@ -1257,7 +1263,7 @@ rule local_diversity_nocell_nan:
                     count_column = nxy[1], 
                     count_row = nxy[1],
                     labels=scinames
-                ).get_partition_values_noreplace(q)
+                ).get_partition_values_noreplace_nocell_nan(q)
                 Xas = list(rect.values())
                 dict_a_q_Xas[area][q] = Xas
 
@@ -1266,8 +1272,114 @@ rule local_diversity_nocell_nan:
         with open(output.local_diversity_nocell_nan_dict_fn, 'w') as f:
             yaml.dump(dict_a_q_Xas, f, default_flow_style=False)        
 
+rule beta_diversity:
+    input: 
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
+        centroid_sciname_fn = centroid_sciname_fmt
+    output:
+        beta_diversity_fn = beta_diversity_fmt,
+    run:
+        centroid_sciname = pd.read_csv(input.centroid_sciname_fn)
+        coords = np.array([
+            eval(c) for c in centroid_sciname["coord"].values
+        ])
+        scinames_cosdist = centroid_sciname["sciname"].values
 
+        scinames_sort = [
+            'Pasteurellaceae',
+            'Corynebacterium',
+            'Veillonella',
+            'Actinomyces',
+            'Selenomonas',
+            'Rothia',
+            'Porphyromonas',
+            'Capnocytophaga',
+            'Prevotella',
+            'Streptococcus',
+            'Gemella',
+            'Campylobacter',
+            'Lautropia',
+            'Leptotrichia',
+            'Neisseriaceae',
+            'Treponema',
+            'Fusobacterium',
+            'Saccharibacteria'
+        ]
+        dict_sci_rename = {
+            'TM7':'Saccharibacteria',
+            'Neisseria':'Neisseriaceae'
+        }
 
+        # Resolution
+        res_mpix = fsi.get_resolution(input.czi_fns[0])
+        res_umpix = res_mpix * 1e6   
+
+        # Get regions
+        pdict = config['beta_diversity']
+        radii = pdict['radii_um']
+        n_compare = pdict['n_pairs']
+
+        dict_rad_dist_bcmean = {}
+        for radius_um in radii:
+            print('Finding neighbors:', radius_um, 'um')
+            radius_pix = radius_um / res_umpix
+            euc_bc = []
+            nbrs = NearestNeighbors(radius=radius_pix)
+            nbrs.fit(coords)
+            nn = nbrs.radius_neighbors(coords, return_distance=False)
+            choice = np.arange(coords.shape[0])
+            rand_lst = [
+                np.random.choice(choice, size=(1,2), replace=False) 
+                for _ in range(n_compare)
+            ]
+            print('Found neighbors')
+
+            # iterate through random pairs of cells
+            print('Finding bray curtis distances')
+            for r in rand_lst:
+                r = np.squeeze(r)
+                euclid = euclidean(coords[r[0]], coords[r[1]])
+                # get nearest neighbors for both indices
+                nns = [nn[r_] for r_ in r]
+                # get scinames for nearest neighbors
+                nn_mats = []
+                for ns in nns:
+                    scis = []
+                    for i in ns:
+                        sci = scinames_cosdist[i]
+                        sci = dict_sci_rename[sci] if sci in dict_sci_rename else sci
+                        scis.append(sci)
+                    # Build feature matrices
+                    scis = np.array(scis)
+                    mat = []
+                    for sci in scinames_sort:
+                        count = sum(scis == sci)
+                        mat.append(count)
+                    nn_mats.append(mat)
+
+                # Get distance
+                bc = braycurtis(nn_mats[0], nn_mats[1])
+                euc_bc.append([euclid, bc])    
+            print('Got distances')
+            
+            # group 
+            d_um = []
+            d_ = 0
+            while d_ < pdict['dist_limit']:
+                d_ += radius_um * 2
+                d_um.append(d_)
+            d = [dp / res_umpix for dp in d_um]
+            dict_dist_bcvals = defaultdict(list)
+            for euc, bc in euc_bc:
+                for i in range(len(d) - 1):
+                    if (euc >= d[i]) and (euc < d[i+1]):
+                        dict_dist_bcvals[d_um[i]].append(bc)
+            
+            dict_dist_bcmean = {k:np.mean(v) for k, v in dict_dist_bcvals.items()}
+            dict_rad_dist_bcmean[radius_um] = dict_dist_bcmean
+        
+        with open(output.beta_diversity_fn, 'w') as f:
+            yaml.dump(dict_rad_dist_bcmean, f, default_flow_style=False)         
 # rule box_counting_dimension_old:
 #     input:
 #         czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.date}',f'{wildcards.sn}'),
