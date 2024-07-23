@@ -21,7 +21,7 @@ Cythonize [functions/neighbor2d.pyx](https://github.com/benjamingrodner/peri_imp
 
 List input image filenames in the format of [input_table_test.csv](https://github.com/benjamingrodner/peri_implantitis_HiPRFISH_analysis/blob/main/input_table_test.csv)
 
-Adjust config.yaml to point to the input table, functions, genus barcode, and output directories. You can also adjust image processing parameters here. 
+Adjust [config.yaml](https://github.com/benjamingrodner/peri_implantitis_HiPRFISH_analysis/blob/main/config.yaml) to point to the input table, functions, genus barcode, and output directories. You can also adjust image processing parameters here. 
 
 Run the image processing pipeline
 
