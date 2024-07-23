@@ -1,12 +1,7 @@
-functions_path: ../../../manuscripts/mgefish/code/functions
-# input_table: input_table_test.csv
-# input_table: input_table_nonproblem.csv
-# input_table: input_table_20240506.csv
-# input_table: input_table_problemchild.csv
-# input_table: input_table_problem1.csv
-# input_table: input_table_problem2.csv
-input_table: input_table_all.csv
-output_dir: ../outputs/segmentation_2024_03_07
+functions_path: functions
+input_table: input_table_test.csv
+output_dir: ../outputs
+genus_barcode_dir: genus_barcodes
 max_shift: 500
 gauss: 3
 diff_gauss: (2, 3)
@@ -25,7 +20,7 @@ umap_dims: (5,5)
 s_u: 1
 alpha_u: 0.25
 cmap_u: 'Spectral'
-ref_dir: "../../../manuscripts/mgefish/data/unused/fig_5/HiPRFISH_reference_spectra"
+ref_dir: "../HiPRFISH_reference_spectra"
 
 plot_spectra:
   xs: [3, 7, 10, 24, 27, 29, 31, 33, 43, 47,57, 60]

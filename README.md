@@ -1,48 +1,63 @@
-# Healthy vs diseased tooth and implant plaque biofilms
+# Microscale Spatial Dysbiosis in Oral biofilms Associated with Disease
 
-Identify characteristic spatial structures and/or determine the range of spatial structures in plaque biofilms.
+This repository contains the specific code used to generate the figures in "Microscale Spatial Dysbiosis in Oral biofilms Associated with Disease"
 
-HSDM plaque biofilm hiprfish image processing
+## Acknowledgement
 
-Mix of tooth and implant, healthy and diseased
+This code makes use of open source packages including `numpy`, `pandas`, `aicsimageio`, `scikit-image`, `scikit-learn`, `PySAL`, `OpenCV`, `scipy`, `turbustat`, and `matplotlib`.
 
-4 different datasets: 
-        2023_02_18
-        2023_02_08
-        2023_10_16
-        2022_12_16
+This code also makes use of [code](https://github.com/proudquartz/hiprfish) developed in [Shi, et al. 2020](https://doi.org/10.1038/s41586-020-2983-4). 
 
-Mix of encodings, commonly with 5bit and 3 lasers (488, 514, 561), one set with 7bit and 4 lasers (add 633).
+## Image processing
 
-Commonly tiled images or multiple scenes. 
-
-### nb_evaluate_images.ipynb 
-
-I've written a script to register stage shifts between lasers and segment each tile individually and output segmented .npy file and cell properties including average spectrum in .czv file as well as an rgb plot of the raw signal and a segmentation plot (I used functions from https://github.com/benjamingrodner/hipr_mge_fish). 
-
-I added a section to correct shifts calculated using the phase cross correlation that were outliers from the other shifts in the other tiles. I replaced deviating shifts with the median shift for that laser. 
-
-After segmentation there are 984,005 cells
-
-### nb_stitching.ipynb
-
-I tried to figure out [m2stitch](https://github.com/yfukai/m2stitch/tree/master), but it was not working. 
-
-### Snakemake pipeline
-
-I ran segmentation in nb_evaluate_images.ipynb, but transferred the code over to Snakefile...still need to test. 
-
-I ran the images through the pipeline for cluster, classif, and get_coords rules. 
-
-input_table.csv needs full filepaths containing the date at the beginning as yyyy_mm_dd and "fov_\d\d" right before the laser identifier. Include all laser czis in the table, they get grouped together. 
-
-Lots of config stuff still in the snakemake like defining colors for taxa, specifying barcode type, and path to barcode assignment file. 
-
-Input and output stuff is in the config.yaml file. 
-
-Usage: 
+Create a conda environment using:
 
 ```
-snakemake --configfile config.yaml -j 20 -p
+conda env create -f env_image_processing.yml
+conda activate env_image_processing
 ```
 
+Cythonize "functions/neighbor2d.pyx" as in this [tutorial](https://docs.cython.org/en/latest/src/quickstart/build.html). 
+
+List input image filenames in the format of "input_table_test.csv"
+
+Adjust config.yaml to point to the input table, functions, genus barcode, and output directories. You can also adjust image processing parameters here. 
+
+Run the image processing pipeline
+
+```
+snakemake -s Snakefile_image_processing --configfile config.yaml -j NUM_CORES -p
+```
+## Cell density power spectrum
+
+Create a new conda environment:
+
+```
+conda env create --f env_turbustat.yml
+conda activate env_turbustat
+```
+
+Run the power spectrum pipeline
+
+```
+snakemake -s Snakefile_turbustat --configfile config.yaml -j NUM_CORES -p
+```
+
+For a more hands on look at the power spectrum analysis see "nb_turbustat.ipynb"
+
+## Spatial analysis
+
+Create a new conda environment:
+
+```
+conda env create --f env_spatial.yml
+conda activate env_spatial
+```
+
+Run the power spectrum pipeline
+
+```
+snakemake -s Snakefile_spatial --configfile config.yaml -j NUM_CORES -p
+```
+
+Some of the plotting is done manually in "nb_spatial_stats.ipynb"
